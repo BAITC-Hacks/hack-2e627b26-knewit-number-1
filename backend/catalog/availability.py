@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Iterable
 
@@ -25,9 +26,26 @@ def calculate_availability(
     total_quantity: Any,
     sellable_store_ids: Iterable[int],
     rule_version: str,
+    observed_at: datetime | None = None,
+    stale_after_seconds: float | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     """Apply the same conservative store allowlist rule to every provider."""
     allowed = set(sellable_store_ids)
+    if (
+        observed_at is not None
+        and stale_after_seconds is not None
+        and stale_after_seconds >= 0
+    ):
+        current_time = now or datetime.now(timezone.utc)
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+        if (current_time - observed_at).total_seconds() > stale_after_seconds:
+            return {
+                "status": "stale",
+                "sellable_quantity": None,
+                "rule_version": rule_version,
+            }
     total = _quantity(total_quantity)
     if total is None:
         return {
