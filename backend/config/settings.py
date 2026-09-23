@@ -20,11 +20,27 @@ ALLOWED_HOSTS = [
 ]
 
 ROOT_URLCONF = "config.urls"
-INSTALLED_APPS = ["django.contrib.staticfiles", "catalog"]
+INSTALLED_APPS = [
+    "django.contrib.sessions",
+    "django.contrib.staticfiles",
+    "catalog",
+    "cart",
+]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
+    "django.contrib.sessions.middleware.SessionMiddleware",
     "django.middleware.common.CommonMiddleware",
+    "django.middleware.csrf.CsrfViewMiddleware",
 ]
+
+DATABASES = {
+    "default": {
+        "ENGINE": "django.db.backends.sqlite3",
+        "NAME": os.environ.get("SQLITE_PATH", BASE_DIR / "db.sqlite3"),
+        # BEGIN IMMEDIATE serializes fixture cart writes before their first read.
+        "OPTIONS": {"timeout": 5, "transaction_mode": "IMMEDIATE"},
+    }
+}
 
 USE_TZ = True
 TIME_ZONE = os.environ.get("TZ", "Asia/Almaty")
@@ -32,6 +48,21 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 STATIC_URL = "/static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
+
+SESSION_ENGINE = "django.contrib.sessions.backends.db"
+SESSION_COOKIE_HTTPONLY = True
+SESSION_COOKIE_SAMESITE = "Lax"
+SESSION_COOKIE_SECURE = DJANGO_ENV == "production"
+CSRF_COOKIE_SAMESITE = "Lax"
+CSRF_COOKIE_SECURE = DJANGO_ENV == "production"
+CSRF_FAILURE_VIEW = "cart.views.csrf_failure"
+
+CART_ACTION_TTL_SECONDS = min(
+    300, max(1, int(os.environ.get("CART_ACTION_TTL_SECONDS", "300")))
+)
+CART_CURRENCY = "KZT"
+CART_URL = "/demo/cart/"
+CART_MAX_QUANTITY = max(1, int(os.environ.get("CART_MAX_QUANTITY", "10000")))
 
 CATALOG_PROVIDER = os.environ.get("CATALOG_PROVIDER", "fixture").strip().lower()
 EKT_API_BASE_URL = os.environ.get("EKT_API_BASE_URL", "https://ekt.kz/api").rstrip("/")

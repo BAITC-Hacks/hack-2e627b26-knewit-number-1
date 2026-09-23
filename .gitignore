@@ -8,5 +8,6 @@ dist/
 build/
 __pycache__/
 *.py[cod]
+*.sqlite3
 .pytest_cache/
 backend/var/
