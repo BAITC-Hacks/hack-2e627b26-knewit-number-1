@@ -1,6 +1,16 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import {
+  CartApiError,
+  confirmCartAction,
+  confirmCartText,
+  createCartAction,
+  getCart,
+  getProduct,
+} from "./cartApi.js";
 
 const MAX_MESSAGE_LENGTH = 1200;
+const DEMO_PRODUCT_ID = 900001;
+const TEXT_CONFIRMATIONS = new Set(["да", "подтверждаю", "добавить в корзину"]);
 const SAFE_ERROR_MESSAGE =
   "Не удалось получить ответ. Проверьте соединение и попробуйте ещё раз.";
 
@@ -19,28 +29,6 @@ const SUGGESTIONS = [
   },
 ];
 
-const DEMO_PRODUCT = {
-  id: 515291,
-  name: "027228 АВ DRX250 MT 3ф 160А 18ka Legrand (1)",
-  article: "200300285_",
-  price: 64920,
-  quantity: 23,
-  image: "https://ekt.kz/upload/iblock/1ca/8mdfx6517jvalt5da1n9865q2fzpj6jp/027228_av_drx250_mt_3f_160a_18ka_legrand_1.jpg",
-  url: "https://ekt.kz/catalog/nizkovoltnaya_apparatura/silovye_avtomaticheskie_vyklyuchateli/drx250_mt_10_250_a_legrand/027228_av_drx250_mt_3f_160a_18ka_legrand_1/",
-  data_status: "live",
-  verified_at: new Date().toISOString(),
-  characteristics: [
-    ["Серия", "DRX250 MT"],
-    ["Полюса", "3"],
-    ["Номинальный ток", "160 А"],
-    ["Отключающая способность", "18 кА"],
-    ["Напряжение", "400 В AC"],
-    ["Бренд", "Legrand"],
-  ],
-  fit_reason: "Подходит для промышленной и коммерческой сети, если нужны 3 полюса и ток до 160 А.",
-  important_difference: "Перед заказом проверьте ток уставки: в свойствах каталога также указано номинальное значение 250 А.",
-};
-
 function createWelcomeMessage() {
   return {
     id: "welcome",
@@ -49,6 +37,15 @@ function createWelcomeMessage() {
       "Здравствуйте! Я помогу найти электротехнический товар, проверить наличие и подобрать подходящий вариант.\n\nЧто вы ищете?",
     suggestions: SUGGESTIONS,
   };
+}
+
+function createId(prefix) {
+  const value = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${prefix}-${value}`;
+}
+
+function normalizeConfirmation(value) {
+  return String(value).toLocaleLowerCase("ru-RU").trim().split(/\s+/).join(" ");
 }
 
 function getTimeLabel() {
@@ -75,7 +72,7 @@ function sanitizeAssistantText(value) {
     : withoutSecrets;
 }
 
-function createAssistantResponse(prompt) {
+async function createAssistantResponse(prompt, signal) {
   const normalized = prompt.toLowerCase();
 
   if (normalized.includes("ошибка")) {
@@ -91,36 +88,28 @@ function createAssistantResponse(prompt) {
   }
 
   if (normalized.includes("автомат") || normalized.includes("legrand")) {
+    const product = await getProduct(DEMO_PRODUCT_ID, { signal });
     return {
-      content: "Нашёл подходящую позицию в каталоге:",
-      product: { ...DEMO_PRODUCT, verified_at: new Date().toISOString() },
+      content: "Нашёл демонстрационную позицию в каталоге. Укажите количество и проверьте резюме перед добавлением:",
+      product: { ...product, verified_at: new Date().toISOString() },
     };
   }
 
   return "Принял запрос. В рабочей версии я найду товар в каталоге, проверю актуальные цену и наличие, а при необходимости покажу объяснимые аналоги. Сейчас это демонстрационный каркас чата.";
 }
 
-function requestDemoAnswer(prompt, signal) {
-  return new Promise((resolve, reject) => {
-    const timeoutId = window.setTimeout(() => {
-      try {
-        resolve(createAssistantResponse(prompt));
-      } catch (error) {
-        reject(error);
-      }
-    }, 1150);
-
-    signal.addEventListener(
-      "abort",
-      () => {
-        window.clearTimeout(timeoutId);
-        const error = new Error("aborted");
-        error.name = "AbortError";
-        reject(error);
-      },
-      { once: true },
-    );
+async function requestDemoAnswer(prompt, signal) {
+  await new Promise((resolve, reject) => {
+    const timeoutId = window.setTimeout(resolve, 650);
+    signal.addEventListener("abort", () => {
+      window.clearTimeout(timeoutId);
+      const error = new Error("aborted");
+      error.name = "AbortError";
+      reject(error);
+    }, { once: true });
   });
+
+  return createAssistantResponse(prompt, signal);
 }
 
 function Icon({ name, size = 18 }) {
@@ -178,6 +167,50 @@ function formatProductPrice(value) {
   return `${new Intl.NumberFormat("ru-RU").format(price)} ₸`;
 }
 
+function formatMoney(value, currency = "KZT") {
+  const amount = toFiniteNumber(value);
+  if (amount === null) return "Информация не найдена";
+  try {
+    return new Intl.NumberFormat("ru-RU", {
+      style: "currency",
+      currency,
+      maximumFractionDigits: Number.isInteger(amount) ? 0 : 2,
+    }).format(amount);
+  } catch {
+    return `${new Intl.NumberFormat("ru-RU").format(amount)} ${currency}`;
+  }
+}
+
+function formatExpiry(value) {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return "в течение нескольких минут";
+  return `до ${new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(date)}`;
+}
+
+function cartErrorCopy(code, payload = {}) {
+  const messages = {
+    ambiguous_confirmation: "В диалоге несколько предложений. Нажмите кнопку в нужном резюме.",
+    no_active_action: "Активного предложения нет. Выберите количество в карточке товара.",
+    confirmation_required: "Это сообщение не подтверждает изменение корзины.",
+    product_unavailable: "Товар сейчас недоступен для добавления в корзину.",
+    cart_integration_unavailable: "Добавление в рабочую корзину пока недоступно. Демо работает только с fixture-каталогом.",
+    cart_currency_mismatch: "В корзине уже есть товары в другой валюте.",
+    quantity_limit_exceeded: `Можно выбрать не более ${payload?.maximum_quantity ?? "доступного лимита"}.`,
+    quantity_rule_violation: "Количество не соответствует правилам продажи товара.",
+    catalog_verification_failed: "Не удалось заново проверить цену и остаток. Корзина не изменена.",
+    cart_mutation_failed: "Добавление не завершено. Мы проверили актуальное состояние корзины.",
+    cart_busy: "Корзина занята другим изменением. Повторите подтверждение.",
+    action_in_progress: "Действие ещё обрабатывается. Повторите проверку через несколько секунд.",
+    action_expired: "Срок действия резюме истёк. Сформируйте новое.",
+    action_stale: "Резюме устарело, а актуального варианта сейчас нет.",
+    action_failed: "Это действие уже завершилось ошибкой. Создайте новое резюме.",
+    csrf_failed: "Защитная сессия корзины обновлена. Повторите действие.",
+    csrf_cookie_missing: "Защитная сессия корзины обновлена. Повторите действие.",
+    network_error: "Связь прервалась. Состояние корзины перепроверено; можно безопасно повторить это подтверждение.",
+  };
+  return messages[code] ?? "Не удалось изменить корзину. Попробуйте сформировать новое резюме.";
+}
+
 function formatVerifiedAt(value) {
   const date = new Date(value);
   if (!value || Number.isNaN(date.getTime())) return "Информация не найдена";
@@ -223,19 +256,27 @@ function getProductCharacteristics(product) {
   return [["Характеристики", "Информация не найдена"]];
 }
 
-function ProductCard({ product }) {
+function ProductCard({ cartStatus, messageId, onCreateProposal, product, proposalState }) {
   const [imageFailed, setImageFailed] = useState(false);
+  const [selectedQuantity, setSelectedQuantity] = useState("1");
   const productName = displayProductValue(product?.name);
   const article = displayProductValue(product?.article);
   const isCached = [product?.data_status, product?.dataStatus, product?.source, product?.status]
     .some((value) => String(value ?? "").toLowerCase() === "cached" || String(value ?? "").toLowerCase() === "cache");
   const verifiedAt = product?.verified_at ?? product?.verifiedAt;
   const characteristics = getProductCharacteristics(product);
-  const quantity = toFiniteNumber(product?.quantity);
+  const sellableQuantity = toFiniteNumber(product?.availability?.sellable_quantity);
+  const quantity = sellableQuantity ?? toFiniteNumber(product?.quantity);
   const quantityKnown = quantity !== null;
-  const availability = quantityKnown
-    ? quantity > 0 ? `В наличии: ${quantity} шт.` : "Нет в наличии"
-    : "Наличие: информация не найдена";
+  const isSellable = product?.availability?.status === "available" && sellableQuantity > 0;
+  const availability = product?.availability?.status === "availability_unknown"
+    ? "Доступность не подтверждена"
+    : quantityKnown
+      ? quantity > 0 ? `Доступно: ${quantity} шт.` : "Нет в наличии"
+      : "Наличие: информация не найдена";
+  const isProposing = proposalState === "proposing";
+  const numericQuantity = Number(selectedQuantity);
+  const quantityIsValid = Number.isInteger(numericQuantity) && numericQuantity > 0;
 
   return (
     <article className="product-card" aria-label={`Карточка товара: ${productName}`}>
@@ -257,7 +298,7 @@ function ProductCard({ product }) {
         <div className="product-card-article">Артикул: {article}</div>
         <div className="product-card-summary">
           <strong className="product-card-price">{formatProductPrice(product?.price)}</strong>
-          <span className={`product-card-availability ${quantityKnown && quantity > 0 ? "product-card-availability--in" : ""}`}>
+          <span className={`product-card-availability ${isSellable ? "product-card-availability--in" : ""}`}>
             {availability}
           </span>
         </div>
@@ -284,6 +325,39 @@ function ProductCard({ product }) {
             {product.important_difference && <p><strong>Важно:</strong> {product.important_difference}</p>}
           </div>
         )}
+        <form
+          className="product-card-cart"
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (quantityIsValid) onCreateProposal(product, messageId, numericQuantity);
+          }}
+        >
+          <label htmlFor={`quantity-${messageId}`}>Количество</label>
+          <div className="product-card-cart-controls">
+            <input
+              aria-describedby={`quantity-help-${messageId}`}
+              disabled={!isSellable || isProposing}
+              id={`quantity-${messageId}`}
+              inputMode="numeric"
+              min="1"
+              onChange={(event) => setSelectedQuantity(event.target.value)}
+              step="1"
+              type="number"
+              value={selectedQuantity}
+            />
+            <button disabled={cartStatus === "loading" || !isSellable || !quantityIsValid || isProposing} type="submit">
+              <Icon name="cart" size={15} />
+              {isProposing ? "Проверяю…" : proposalState === "failed" ? "Повторить" : "Добавить"}
+            </button>
+          </div>
+          <span className="product-card-cart-help" id={`quantity-help-${messageId}`}>
+            {cartStatus === "loading"
+              ? "Подготавливаем защищённую сессию корзины"
+              : cartStatus === "error"
+                ? "Соединение восстановится при следующей попытке"
+                : "Сначала покажем итоговое резюме"}
+          </span>
+        </form>
         {product?.url ? (
           <a
             className="product-card-link"
@@ -301,14 +375,78 @@ function ProductCard({ product }) {
   );
 }
 
-function MessageBubble({ message, onSuggestion, onRetry }) {
+function CartConfirmation({ action, onConfirm, phase = "proposed", result, statusNote }) {
+  const product = action?.product ?? {};
+  const isPending = phase === "confirming";
+  const isInactive = ["expired", "failed", "succeeded"].includes(phase);
+
+  if (phase === "succeeded" && result) {
+    return (
+      <section className="cart-result cart-result--success" aria-label="Товар добавлен в корзину">
+        <div className="cart-result-icon"><Icon name="check" size={18} /></div>
+        <div>
+          <strong>Добавлено: {result.added_quantity} шт.</strong>
+          <span>Корзина обновлена</span>
+        </div>
+        <a href={result.cart?.url || "/demo/cart/"} rel="noopener noreferrer" target="_blank">
+          Открыть корзину <span aria-hidden="true">↗</span>
+        </a>
+      </section>
+    );
+  }
+
+  return (
+    <section
+      className={`cart-confirmation cart-confirmation--${phase}`}
+      data-action-id={action?.action_id}
+      aria-label="Резюме добавления в корзину"
+    >
+      <div className="cart-confirmation-head">
+        <span><Icon name="cart" size={14} /> Резюме заказа</span>
+        <span>{phase === "expired" ? "Устарело" : phase === "failed" ? "Ошибка" : "Нужно подтверждение"}</span>
+      </div>
+      <div className="cart-confirmation-product">
+        <strong>{displayProductValue(product.name)}</strong>
+        <span>Артикул {displayProductValue(product.article)}</span>
+      </div>
+      <dl className="cart-confirmation-lines">
+        <div><dt>Количество</dt><dd>{action.quantity} шт.</dd></div>
+        <div><dt>Цена за единицу</dt><dd>{formatMoney(action.unit_price, action.currency)}</dd></div>
+        <div className="cart-confirmation-total"><dt>Итого</dt><dd>{formatMoney(action.total, action.currency)}</dd></div>
+      </dl>
+      <p className="cart-confirmation-note">
+        Цена и остаток будут проверены ещё раз. Резюме действует {formatExpiry(action.expires_at)}.
+      </p>
+      {statusNote && <p className="cart-confirmation-status" role="status">{statusNote}</p>}
+      <button
+        className="cart-confirmation-button"
+        disabled={isPending || isInactive}
+        onClick={() => onConfirm(action.action_id)}
+        type="button"
+      >
+        {isPending ? "Проверяю цену и остаток…" : isInactive ? "Подтверждение недоступно" : "Подтвердить и добавить"}
+      </button>
+    </section>
+  );
+}
+
+function MessageBubble({
+  cartStatus,
+  cartRequest,
+  message,
+  onConfirmAction,
+  onCreateProposal,
+  onRetry,
+  onSuggestion,
+}) {
   const isUser = message.role === "user";
   const paragraphs = sanitizeAssistantText(message.content).split(/\n{2,}/);
+  const isRich = Boolean(message.product || message.cartAction);
 
   return (
     <div className={`message-row ${isUser ? "message-row--user" : "message-row--assistant"}`}>
       <div
-        className={`message-bubble ${isUser ? "message-bubble--user" : "message-bubble--assistant"}${message.error ? " message-bubble--error" : ""}`}
+        className={`message-bubble ${isUser ? "message-bubble--user" : "message-bubble--assistant"}${message.error ? " message-bubble--error" : ""}${isRich ? " message-bubble--rich" : ""}`}
       >
         {message.error && (
           <div className="message-kicker message-kicker--error">
@@ -319,7 +457,24 @@ function MessageBubble({ message, onSuggestion, onRetry }) {
         {paragraphs.map((paragraph, index) => (
           <p key={`${message.id}-paragraph-${index}`}>{paragraph}</p>
         ))}
-        {message.product && <ProductCard product={message.product} />}
+        {message.product && (
+          <ProductCard
+            cartStatus={cartStatus}
+            messageId={message.id}
+            onCreateProposal={onCreateProposal}
+            product={message.product}
+            proposalState={cartRequest?.kind === "proposal" && cartRequest.key === message.id ? "proposing" : message.proposalState}
+          />
+        )}
+        {message.cartAction && (
+          <CartConfirmation
+            action={message.cartAction}
+            onConfirm={onConfirmAction}
+            phase={message.cartPhase}
+            result={message.cartResult}
+            statusNote={message.cartStatusNote}
+          />
+        )}
         {message.suggestions && (
           <div className="suggestion-list" aria-label="Примеры запросов">
             {message.suggestions.map((suggestion) => (
@@ -334,7 +489,7 @@ function MessageBubble({ message, onSuggestion, onRetry }) {
             ))}
           </div>
         )}
-        {message.error && (
+        {message.error && message.retryPrompt && (
           <button
             className="retry-button"
             onClick={() => onRetry(message.retryPrompt, message.id)}
@@ -370,6 +525,7 @@ function TypingMessage({ onCancel }) {
 
 function ConfirmClearDialog({ onCancel, onConfirm }) {
   const cancelRef = useRef(null);
+  const confirmRef = useRef(null);
 
   useEffect(() => {
     cancelRef.current?.focus();
@@ -384,6 +540,15 @@ function ConfirmClearDialog({ onCancel, onConfirm }) {
         className="confirm-dialog"
         onKeyDown={(event) => {
           if (event.key === "Escape") onCancel();
+          if (event.key === "Tab") {
+            if (event.shiftKey && document.activeElement === cancelRef.current) {
+              event.preventDefault();
+              confirmRef.current?.focus();
+            } else if (!event.shiftKey && document.activeElement === confirmRef.current) {
+              event.preventDefault();
+              cancelRef.current?.focus();
+            }
+          }
         }}
         role="alertdialog"
       >
@@ -395,7 +560,7 @@ function ConfirmClearDialog({ onCancel, onConfirm }) {
           <button className="button button--secondary" onClick={onCancel} ref={cancelRef} type="button">
             Отмена
           </button>
-          <button className="button button--danger" onClick={onConfirm} type="button">
+          <button className="button button--danger" onClick={onConfirm} ref={confirmRef} type="button">
             Очистить
           </button>
         </div>
@@ -404,15 +569,27 @@ function ConfirmClearDialog({ onCancel, onConfirm }) {
   );
 }
 
-function ChatWidget({ isOpen, onOpenChange }) {
+function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChange }) {
   const [messages, setMessages] = useState(() => [createWelcomeMessage()]);
   const [inputValue, setInputValue] = useState("");
   const [phase, setPhase] = useState("idle");
+  const [cartRequest, setCartRequest] = useState(null);
   const [isClearDialogOpen, setIsClearDialogOpen] = useState(false);
   const inputRef = useRef(null);
   const launcherRef = useRef(null);
+  const clearButtonRef = useRef(null);
   const bodyRef = useRef(null);
+  const openFocusTimerRef = useRef(null);
   const pendingRef = useRef(null);
+  const cartLockRef = useRef(false);
+  const dialogIdRef = useRef(createId("dialog"));
+  const messageVersionRef = useRef(0);
+  const proposalRetryRef = useRef(new Map());
+
+  const closeClearDialog = useCallback(() => {
+    setIsClearDialogOpen(false);
+    requestAnimationFrame(() => clearButtonRef.current?.focus());
+  }, []);
 
   const scrollToLatest = useCallback(() => {
     requestAnimationFrame(() => {
@@ -422,9 +599,24 @@ function ChatWidget({ isOpen, onOpenChange }) {
 
   useEffect(() => {
     if (isOpen) {
-      window.setTimeout(() => inputRef.current?.focus(), 120);
+      openFocusTimerRef.current = window.setTimeout(() => {
+        openFocusTimerRef.current = null;
+        inputRef.current?.focus();
+      }, 120);
     }
+
+    return () => {
+      if (openFocusTimerRef.current) window.clearTimeout(openFocusTimerRef.current);
+      openFocusTimerRef.current = null;
+    };
   }, [isOpen]);
+
+  useEffect(() => {
+    if (isClearDialogOpen && openFocusTimerRef.current) {
+      window.clearTimeout(openFocusTimerRef.current);
+      openFocusTimerRef.current = null;
+    }
+  }, [isClearDialogOpen]);
 
   useEffect(() => {
     scrollToLatest();
@@ -434,7 +626,7 @@ function ChatWidget({ isOpen, onOpenChange }) {
     const handleKeyDown = (event) => {
       if (event.key !== "Escape") return;
       if (isClearDialogOpen) {
-        setIsClearDialogOpen(false);
+        closeClearDialog();
       } else if (isOpen) {
         onOpenChange(false);
         launcherRef.current?.focus();
@@ -443,12 +635,268 @@ function ChatWidget({ isOpen, onOpenChange }) {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isClearDialogOpen, isOpen]);
+  }, [closeClearDialog, isClearDialogOpen, isOpen, onOpenChange]);
 
   useEffect(() => () => {
     pendingRef.current?.controller.abort();
     if (pendingRef.current?.statusTimer) window.clearTimeout(pendingRef.current.statusTimer);
   }, []);
+
+  const updateCartFromPayload = useCallback((payload) => {
+    if (payload?.cart) onCartChange(payload.cart);
+  }, [onCartChange]);
+
+  const expireActiveSummaries = useCallback((current, exceptActionId = "") => current.map((message) => {
+    if (
+      message.cartAction
+      && message.cartPhase === "proposed"
+      && message.cartAction.action_id !== exceptActionId
+    ) {
+      return {
+        ...message,
+        cartPhase: "expired",
+        cartStatusNote: "Это резюме заменено более новым.",
+      };
+    }
+    return message;
+  }), []);
+
+  const appendReplacement = useCallback((payload, sourceActionId, content) => {
+    const replacement = payload?.replacement_action;
+    if (replacement?.message_version) {
+      messageVersionRef.current = Math.max(messageVersionRef.current, replacement.message_version);
+    }
+    updateCartFromPayload(payload);
+    setMessages((current) => {
+      const updated = expireActiveSummaries(current).map((message) => (
+        message.cartAction?.action_id === sourceActionId
+          ? { ...message, cartPhase: "expired", cartStatusNote: "Данные изменились; используйте новое резюме ниже." }
+          : message
+      ));
+      if (!replacement) {
+        return [
+          ...updated,
+          {
+            id: createId("cart-unavailable"),
+            role: "assistant",
+            content,
+            time: getTimeLabel(),
+          },
+        ];
+      }
+      return [
+        ...updated,
+        {
+          id: createId("cart-replacement"),
+          role: "assistant",
+          content,
+          cartAction: replacement,
+          cartPhase: "proposed",
+          time: getTimeLabel(),
+        },
+      ];
+    });
+  }, [expireActiveSummaries, updateCartFromPayload]);
+
+  const applyCartSuccess = useCallback((result) => {
+    onCartChange(result.cart);
+    setMessages((current) => current.map((message) => (
+      message.cartAction?.action_id === result.action_id
+        ? {
+          ...message,
+          cartPhase: "succeeded",
+          cartResult: result,
+          cartStatusNote: "",
+        }
+        : message
+    )));
+  }, [onCartChange]);
+
+  const createProposal = useCallback(async (product, messageId, quantity) => {
+    if (cartLockRef.current) return;
+    cartLockRef.current = true;
+    setCartRequest({ kind: "proposal", key: messageId });
+    setMessages((current) => current.map((message) => (
+      message.id === messageId ? { ...message, proposalState: "proposing" } : message
+    )));
+
+    const retryPayload = proposalRetryRef.current.get(messageId);
+    const payload = retryPayload?.quantity === quantity
+      ? retryPayload
+      : {
+        dialog_id: dialogIdRef.current,
+        message_id: messageId,
+        message_version: ++messageVersionRef.current,
+        product_id: product.id,
+        offer_id: null,
+        quantity,
+      };
+
+    try {
+      if (cartStatus !== "ready") await onEnsureCart();
+      const action = await createCartAction(payload);
+      proposalRetryRef.current.delete(messageId);
+      setMessages((current) => [
+        ...expireActiveSummaries(current).map((message) => (
+          message.id === messageId ? { ...message, proposalState: "idle" } : message
+        )),
+        {
+          id: createId("cart-summary"),
+          role: "assistant",
+          content: "Проверьте состав действия. Корзина изменится только после подтверждения.",
+          cartAction: action,
+          cartPhase: "proposed",
+          time: getTimeLabel(),
+        },
+      ]);
+    } catch (error) {
+      const apiError = error instanceof CartApiError ? error : new CartApiError(String(error));
+      const response = apiError.payload;
+      updateCartFromPayload(response);
+      if (response?.replacement_action || apiError.code === "insufficient_stock") {
+        proposalRetryRef.current.delete(messageId);
+        setMessages((current) => current.map((message) => (
+          message.id === messageId ? { ...message, proposalState: "idle" } : message
+        )));
+        appendReplacement(
+          response,
+          response?.action_id,
+          response?.replacement_action
+            ? `Запрошенного количества нет. Подготовил новое резюме на ${response.maximum_quantity} шт.`
+            : "Доступный остаток закончился. Товар не добавлен.",
+        );
+      } else {
+        if (["network_error", "csrf_cookie_missing", "csrf_failed"].includes(apiError.code)) {
+          proposalRetryRef.current.set(messageId, payload);
+          if (["csrf_cookie_missing", "csrf_failed"].includes(apiError.code)) {
+            try {
+              await onEnsureCart();
+            } catch {
+              // The same immutable proposal payload remains available for retry.
+            }
+          }
+        } else {
+          proposalRetryRef.current.delete(messageId);
+        }
+        setMessages((current) => [
+          ...current.map((message) => (
+            message.id === messageId ? { ...message, proposalState: "failed" } : message
+          )),
+          {
+            id: createId("cart-error"),
+            role: "assistant",
+            content: cartErrorCopy(apiError.code, response),
+            error: true,
+            time: getTimeLabel(),
+          },
+        ]);
+      }
+    } finally {
+      cartLockRef.current = false;
+      setCartRequest(null);
+    }
+  }, [appendReplacement, cartStatus, expireActiveSummaries, onEnsureCart, updateCartFromPayload]);
+
+  const confirmAction = useCallback(async (actionId) => {
+    if (cartLockRef.current) return;
+    cartLockRef.current = true;
+    setCartRequest({ kind: "confirmation", key: actionId });
+    setMessages((current) => current.map((message) => (
+      message.cartAction?.action_id === actionId
+        ? { ...message, cartPhase: "confirming", cartStatusNote: "" }
+        : message
+    )));
+
+    try {
+      const result = await confirmCartAction(actionId);
+      applyCartSuccess(result);
+    } catch (error) {
+      const apiError = error instanceof CartApiError ? error : new CartApiError(String(error));
+      const response = apiError.payload;
+      updateCartFromPayload(response);
+      if (response?.replacement_action) {
+        appendReplacement(
+          response,
+          actionId,
+          apiError.code === "insufficient_stock"
+            ? `Остаток уменьшился. Подготовил новое резюме на ${response.replacement_action.quantity} шт.`
+            : "Цена, остаток или версия корзины изменились. Подтвердите обновлённое резюме.",
+        );
+      } else if (["network_error", "csrf_cookie_missing", "csrf_failed", "cart_busy", "action_in_progress"].includes(apiError.code)) {
+        try {
+          await onEnsureCart();
+        } catch {
+          // The original action remains the only safe retry target.
+        }
+        setMessages((current) => current.map((message) => (
+          message.cartAction?.action_id === actionId
+            ? { ...message, cartPhase: "proposed", cartStatusNote: cartErrorCopy(apiError.code) }
+            : message
+        )));
+      } else {
+        const nextPhase = ["action_expired", "action_stale"].includes(apiError.code) ? "expired" : "failed";
+        setMessages((current) => current.map((message) => (
+          message.cartAction?.action_id === actionId
+            ? { ...message, cartPhase: nextPhase, cartStatusNote: cartErrorCopy(apiError.code, response) }
+            : message
+        )));
+      }
+    } finally {
+      cartLockRef.current = false;
+      setCartRequest(null);
+    }
+  }, [appendReplacement, applyCartSuccess, onEnsureCart, updateCartFromPayload]);
+
+  const confirmByText = useCallback(async (text) => {
+    if (cartLockRef.current) return;
+    cartLockRef.current = true;
+    setCartRequest({ kind: "text-confirmation", key: dialogIdRef.current });
+    setMessages((current) => current.map((message) => (
+      message.cartAction && message.cartPhase === "proposed"
+        ? { ...message, cartPhase: "confirming", cartStatusNote: "" }
+        : message
+    )));
+    try {
+      const result = await confirmCartText(dialogIdRef.current, text);
+      applyCartSuccess(result);
+    } catch (error) {
+      const apiError = error instanceof CartApiError ? error : new CartApiError(String(error));
+      const response = apiError.payload;
+      updateCartFromPayload(response);
+      if (response?.replacement_action) {
+        appendReplacement(
+          response,
+          response.action_id,
+          "Предложение изменилось. Проверьте и подтвердите новое резюме.",
+        );
+      } else {
+        if (["network_error", "csrf_cookie_missing", "csrf_failed"].includes(apiError.code)) {
+          try {
+            await onEnsureCart();
+          } catch {
+            // A refreshed cart is best-effort; no new mutation is created.
+          }
+        }
+        setMessages((current) => [
+          ...current.map((message) => (
+            message.cartPhase === "confirming"
+              ? { ...message, cartPhase: "proposed", cartStatusNote: "" }
+              : message
+          )),
+          {
+            id: createId("cart-text-error"),
+            role: "assistant",
+            content: cartErrorCopy(apiError.code, response),
+            error: !["ambiguous_confirmation", "no_active_action", "confirmation_required"].includes(apiError.code),
+            time: getTimeLabel(),
+          },
+        ]);
+      }
+    } finally {
+      cartLockRef.current = false;
+      setCartRequest(null);
+    }
+  }, [appendReplacement, applyCartSuccess, onEnsureCart, updateCartFromPayload]);
 
   const cancelGeneration = useCallback(() => {
     const pending = pendingRef.current;
@@ -471,19 +919,15 @@ function ChatWidget({ isOpen, onOpenChange }) {
 
   const sendPrompt = useCallback((rawPrompt, { isRetry = false, errorId = "" } = {}) => {
     const prompt = String(rawPrompt).trim().slice(0, MAX_MESSAGE_LENGTH);
-    if (!prompt || pendingRef.current) return;
+    if (!prompt || pendingRef.current || cartLockRef.current) return;
 
-    const controller = new AbortController();
-    const statusTimer = window.setTimeout(() => setPhase("processing"), 280);
-    pendingRef.current = { controller, statusTimer };
-    setPhase("submitting");
     setInputValue("");
     setMessages((current) => {
       const withoutError = isRetry ? current.filter((message) => message.id !== errorId) : current;
       return [
         ...withoutError,
         {
-          id: `user-${Date.now()}`,
+          id: createId("user"),
           role: "user",
           content: prompt,
           time: getTimeLabel(),
@@ -491,6 +935,15 @@ function ChatWidget({ isOpen, onOpenChange }) {
       ];
     });
 
+    if (TEXT_CONFIRMATIONS.has(normalizeConfirmation(prompt))) {
+      void confirmByText(prompt);
+      return;
+    }
+
+    const controller = new AbortController();
+    const statusTimer = window.setTimeout(() => setPhase("processing"), 280);
+    pendingRef.current = { controller, statusTimer };
+    setPhase("submitting");
     requestDemoAnswer(prompt, controller.signal)
       .then((answer) => {
         if (controller.signal.aborted) return;
@@ -501,7 +954,7 @@ function ChatWidget({ isOpen, onOpenChange }) {
         setMessages((current) => [
           ...current,
           {
-            id: `assistant-${Date.now()}`,
+            id: createId("assistant"),
             role: "assistant",
             content: sanitizeAssistantText(response?.content),
             product: response?.product,
@@ -517,7 +970,7 @@ function ChatWidget({ isOpen, onOpenChange }) {
         setMessages((current) => [
           ...current,
           {
-            id: `error-${Date.now()}`,
+            id: createId("error"),
             role: "assistant",
             content: SAFE_ERROR_MESSAGE,
             error: true,
@@ -526,14 +979,20 @@ function ChatWidget({ isOpen, onOpenChange }) {
           },
         ]);
       });
-  }, []);
+  }, [confirmByText]);
 
   const clearHistory = useCallback(() => {
     if (pendingRef.current) cancelGeneration();
     setMessages([createWelcomeMessage()]);
     setInputValue("");
     setPhase("idle");
+    setCartRequest(null);
+    cartLockRef.current = false;
+    dialogIdRef.current = createId("dialog");
+    messageVersionRef.current = 0;
+    proposalRetryRef.current.clear();
     setIsClearDialogOpen(false);
+    requestAnimationFrame(() => inputRef.current?.focus());
   }, [cancelGeneration]);
 
   const handleSubmit = (event) => {
@@ -541,7 +1000,9 @@ function ChatWidget({ isOpen, onOpenChange }) {
     sendPrompt(inputValue);
   };
 
-  const statusLabel = phase === "processing" || phase === "submitting"
+  const statusLabel = cartRequest
+    ? "Проверяет корзину"
+    : phase === "processing" || phase === "submitting"
     ? "Формирует ответ"
     : phase === "error"
       ? "Нужна повторная попытка"
@@ -587,7 +1048,9 @@ function ChatWidget({ isOpen, onOpenChange }) {
               <button
                 aria-label="Очистить историю"
                 className="icon-button"
+                disabled={Boolean(cartRequest)}
                 onClick={() => setIsClearDialogOpen(true)}
+                ref={clearButtonRef}
                 title="Очистить историю"
                 type="button"
               >
@@ -609,7 +1072,7 @@ function ChatWidget({ isOpen, onOpenChange }) {
           </header>
 
           <div
-            aria-busy={phase === "submitting" || phase === "processing"}
+            aria-busy={Boolean(cartRequest) || phase === "submitting" || phase === "processing"}
             className="chat-body"
             ref={bodyRef}
             role="log"
@@ -619,7 +1082,11 @@ function ChatWidget({ isOpen, onOpenChange }) {
             {messages.map((message) => (
               <MessageBubble
                 key={message.id}
+                cartStatus={cartStatus}
+                cartRequest={cartRequest}
                 message={message}
+                onConfirmAction={confirmAction}
+                onCreateProposal={createProposal}
                 onRetry={(prompt, errorId) => {
                   setPhase("idle");
                   sendPrompt(prompt, { errorId, isRetry: true });
@@ -640,7 +1107,7 @@ function ChatWidget({ isOpen, onOpenChange }) {
               <textarea
                 aria-describedby="composer-disclaimer"
                 autoComplete="off"
-                disabled={Boolean(pendingRef.current)}
+                disabled={Boolean(pendingRef.current) || Boolean(cartRequest)}
                 id="message-input"
                 maxLength={MAX_MESSAGE_LENGTH}
                 onChange={(event) => setInputValue(event.target.value)}
@@ -660,7 +1127,7 @@ function ChatWidget({ isOpen, onOpenChange }) {
                 <button
                   aria-label="Отправить сообщение"
                   className="send-button"
-                  disabled={Boolean(pendingRef.current) || !inputValue.trim()}
+                  disabled={Boolean(pendingRef.current) || Boolean(cartRequest) || !inputValue.trim()}
                   type="submit"
                 >
                   <Icon name="arrow" size={17} />
@@ -675,19 +1142,22 @@ function ChatWidget({ isOpen, onOpenChange }) {
       )}
 
       {isClearDialogOpen && (
-        <ConfirmClearDialog onCancel={() => setIsClearDialogOpen(false)} onConfirm={clearHistory} />
+        <ConfirmClearDialog onCancel={closeClearDialog} onConfirm={clearHistory} />
       )}
     </>
   );
 }
 
-function SitePreview({ onOpenChat }) {
+function SitePreview({ cart, onOpenChat }) {
   const categories = [
     ["Кабель / провод", "Кабель, провод и аксессуары", "#d9f3e9"],
     ["Светильники", "LED, лампы и управление светом", "#e3edff"],
     ["Низковольтная аппаратура", "Автоматика и защита сетей", "#fff0cc"],
     ["Монтаж и инструмент", "Всё для надёжного монтажа", "#f1e5ff"],
   ];
+  const cartCount = Array.isArray(cart?.items)
+    ? cart.items.reduce((total, item) => total + (toFiniteNumber(item?.quantity) ?? 0), 0)
+    : 0;
 
   return (
     <main className="site-preview">
@@ -701,10 +1171,16 @@ function SitePreview({ onOpenChat }) {
           <a href="#delivery">Доставка</a>
           <a href="#contacts">Контакты</a>
         </div>
-        <button className="cart-button" type="button">
+        <a
+          aria-label={`Открыть корзину, товаров: ${cartCount}`}
+          className="cart-button"
+          href={cart?.url || "/demo/cart/"}
+          rel="noopener noreferrer"
+          target="_blank"
+        >
           <Icon name="cart" size={16} />
-          Корзина <span className="cart-count">0</span>
-        </button>
+          Корзина <span className="cart-count">{cartCount}</span>
+        </a>
       </nav>
 
       <section className="hero-preview" id="top">
@@ -760,12 +1236,54 @@ function CookieBanner({ onClose }) {
 export default function App() {
   const [showCookie, setShowCookie] = useState(true);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [cart, setCart] = useState({ items: [], total: "0.00", url: "/demo/cart/" });
+  const [cartStatus, setCartStatus] = useState("loading");
+
+  const refreshCart = useCallback(async () => {
+    setCartStatus("loading");
+    try {
+      const snapshot = await getCart();
+      setCart(snapshot);
+      setCartStatus("ready");
+      return snapshot;
+    } catch (error) {
+      setCartStatus("error");
+      throw error;
+    }
+  }, []);
+
+  useEffect(() => {
+    let ignore = false;
+    const controller = new AbortController();
+    getCart({ signal: controller.signal })
+      .then((snapshot) => {
+        if (ignore) return;
+        setCart(snapshot);
+        setCartStatus("ready");
+      })
+      .catch(() => {
+        if (!ignore) setCartStatus("error");
+      });
+    return () => {
+      ignore = true;
+      controller.abort();
+    };
+  }, []);
 
   return (
     <>
-      <SitePreview onOpenChat={() => setIsChatOpen(true)} />
+      <SitePreview cart={cart} onOpenChat={() => setIsChatOpen(true)} />
       {showCookie && <CookieBanner onClose={() => setShowCookie(false)} />}
-      <ChatWidget isOpen={isChatOpen} onOpenChange={setIsChatOpen} />
+      <ChatWidget
+        cartStatus={cartStatus}
+        isOpen={isChatOpen}
+        onCartChange={(snapshot) => {
+          setCart(snapshot);
+          setCartStatus("ready");
+        }}
+        onEnsureCart={refreshCart}
+        onOpenChange={setIsChatOpen}
+      />
     </>
   );
 }
