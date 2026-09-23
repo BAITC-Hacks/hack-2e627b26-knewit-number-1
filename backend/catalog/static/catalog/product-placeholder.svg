@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="480" viewBox="0 0 640 480" role="img" aria-labelledby="title desc">
+  <title id="title">Демонстрационный товар</title>
+  <desc id="desc">Синтетическое изображение fixture-каталога</desc>
+  <rect width="640" height="480" fill="#eef2f7"/>
+  <rect x="155" y="90" width="330" height="250" rx="24" fill="#ffffff" stroke="#2563eb" stroke-width="8"/>
+  <path d="M240 214h160M320 134v160" stroke="#2563eb" stroke-width="18" stroke-linecap="round"/>
+  <text x="320" y="405" text-anchor="middle" font-family="sans-serif" font-size="28" fill="#334155">DEMO FIXTURE</text>
+</svg>
