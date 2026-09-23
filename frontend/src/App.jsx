@@ -19,6 +19,28 @@ const SUGGESTIONS = [
   },
 ];
 
+const DEMO_PRODUCT = {
+  id: 515291,
+  name: "027228 АВ DRX250 MT 3ф 160А 18ka Legrand (1)",
+  article: "200300285_",
+  price: 64920,
+  quantity: 23,
+  image: "https://ekt.kz/upload/iblock/1ca/8mdfx6517jvalt5da1n9865q2fzpj6jp/027228_av_drx250_mt_3f_160a_18ka_legrand_1.jpg",
+  url: "https://ekt.kz/catalog/nizkovoltnaya_apparatura/silovye_avtomaticheskie_vyklyuchateli/drx250_mt_10_250_a_legrand/027228_av_drx250_mt_3f_160a_18ka_legrand_1/",
+  data_status: "live",
+  verified_at: new Date().toISOString(),
+  characteristics: [
+    ["Серия", "DRX250 MT"],
+    ["Полюса", "3"],
+    ["Номинальный ток", "160 А"],
+    ["Отключающая способность", "18 кА"],
+    ["Напряжение", "400 В AC"],
+    ["Бренд", "Legrand"],
+  ],
+  fit_reason: "Подходит для промышленной и коммерческой сети, если нужны 3 полюса и ток до 160 А.",
+  important_difference: "Перед заказом проверьте ток уставки: в свойствах каталога также указано номинальное значение 250 А.",
+};
+
 function createWelcomeMessage() {
   return {
     id: "welcome",
@@ -69,7 +91,10 @@ function createAssistantResponse(prompt) {
   }
 
   if (normalized.includes("автомат") || normalized.includes("legrand")) {
-    return "Нашёл подходящее направление: автоматические выключатели Legrand. Уточните номинальный ток, количество полюсов и отключающую способность — после этого покажу конкретные позиции, цену и наличие.";
+    return {
+      content: "Нашёл подходящую позицию в каталоге:",
+      product: { ...DEMO_PRODUCT, verified_at: new Date().toISOString() },
+    };
   }
 
   return "Принял запрос. В рабочей версии я найду товар в каталоге, проверю актуальные цену и наличие, а при необходимости покажу объяснимые аналоги. Сейчас это демонстрационный каркас чата.";
@@ -129,6 +154,153 @@ function Icon({ name, size = 18 }) {
   );
 }
 
+function displayProductValue(value) {
+  if (value === null || value === undefined || String(value).trim() === "") {
+    return "Информация не найдена";
+  }
+  return String(value);
+}
+
+function toFiniteNumber(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value === "string" && value.trim() !== "") {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed : null;
+  }
+  return null;
+}
+
+function formatProductPrice(value) {
+  const price = toFiniteNumber(value);
+  if (price === null) {
+    return "Информация не найдена";
+  }
+  return `${new Intl.NumberFormat("ru-RU").format(price)} ₸`;
+}
+
+function formatVerifiedAt(value) {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return "Информация не найдена";
+  return new Intl.DateTimeFormat("ru-RU", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(date);
+}
+
+function formatDataAge(value) {
+  const date = new Date(value);
+  if (!value || Number.isNaN(date.getTime())) return "Информация не найдена";
+  const ageSeconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
+  if (ageSeconds < 60) return "только что";
+  if (ageSeconds < 3600) return `${Math.floor(ageSeconds / 60)} мин. назад`;
+  if (ageSeconds < 86400) return `${Math.floor(ageSeconds / 3600)} ч назад`;
+  return `${Math.floor(ageSeconds / 86400)} дн. назад`;
+}
+
+const PRODUCT_PROPERTY_FIELDS = [
+  ["Серия", ["SERIES", "SERIA", "SERIIA"]],
+  ["Полюса", ["KOLICHESTVO_POLYUSOV"]],
+  ["Номинальный ток", ["NOMINALNYY_TOK"]],
+  ["Отключающая способность", ["NOMINALNAYA_OTKLYUCHAYUSHCHAYA_SPOSOBNOST"]],
+  ["Напряжение", ["NOMINALNOE_NAPRYAZHENIE"]],
+  ["Бренд", ["TORGOVAYA_MARKA", "BRAND"]],
+];
+
+function getProductCharacteristics(product) {
+  if (Array.isArray(product?.characteristics) && product.characteristics.length > 0) {
+    return product.characteristics.map((item, index) => {
+      if (Array.isArray(item)) return [item[0], item[1]];
+      return [item?.label ?? item?.name ?? `Характеристика ${index + 1}`, item?.value];
+    });
+  }
+
+  const properties = product?.properties && typeof product.properties === "object" ? product.properties : {};
+  const mapped = PRODUCT_PROPERTY_FIELDS.map(([label, keys]) => {
+    const key = keys.find((candidate) => properties[candidate] !== undefined);
+    return [label, key ? properties[key] : undefined];
+  });
+  if (mapped.some(([, value]) => value !== undefined && value !== null && value !== "")) return mapped;
+  return [["Характеристики", "Информация не найдена"]];
+}
+
+function ProductCard({ product }) {
+  const [imageFailed, setImageFailed] = useState(false);
+  const productName = displayProductValue(product?.name);
+  const article = displayProductValue(product?.article);
+  const isCached = [product?.data_status, product?.dataStatus, product?.source, product?.status]
+    .some((value) => String(value ?? "").toLowerCase() === "cached" || String(value ?? "").toLowerCase() === "cache");
+  const verifiedAt = product?.verified_at ?? product?.verifiedAt;
+  const characteristics = getProductCharacteristics(product);
+  const quantity = toFiniteNumber(product?.quantity);
+  const quantityKnown = quantity !== null;
+  const availability = quantityKnown
+    ? quantity > 0 ? `В наличии: ${quantity} шт.` : "Нет в наличии"
+    : "Наличие: информация не найдена";
+
+  return (
+    <article className="product-card" aria-label={`Карточка товара: ${productName}`}>
+      <div className="product-card-media">
+        {product?.image && !imageFailed ? (
+          <img
+            alt={`Изображение товара: ${productName}`}
+            className="product-card-image"
+            onError={() => setImageFailed(true)}
+            src={product.image}
+          />
+        ) : (
+          <div className="product-card-image-missing">Изображение: информация не найдена</div>
+        )}
+      </div>
+      <div className="product-card-body">
+        <div className="product-card-eyebrow">Товар из каталога EKT.kz</div>
+        <h3 className="product-card-title">{productName}</h3>
+        <div className="product-card-article">Артикул: {article}</div>
+        <div className="product-card-summary">
+          <strong className="product-card-price">{formatProductPrice(product?.price)}</strong>
+          <span className={`product-card-availability ${quantityKnown && quantity > 0 ? "product-card-availability--in" : ""}`}>
+            {availability}
+          </span>
+        </div>
+        <div className={`product-card-data ${isCached ? "product-card-data--cached" : "product-card-data--live"}`}>
+          <span className="product-card-data-dot" />
+          <span>{isCached ? "Данные из кэша" : "Данные live"}</span>
+          {isCached && (
+            <span className="product-card-data-age">
+              verified_at: {formatVerifiedAt(verifiedAt)} · возраст: {formatDataAge(verifiedAt)}
+            </span>
+          )}
+        </div>
+        <dl className="product-card-characteristics">
+          {characteristics.map(([label, value]) => (
+            <div className="product-characteristic" key={label}>
+              <dt>{displayProductValue(label)}</dt>
+              <dd>{displayProductValue(value)}</dd>
+            </div>
+          ))}
+        </dl>
+        {(product?.fit_reason || product?.important_difference) && (
+          <div className="product-card-notes">
+            {product.fit_reason && <p><strong>Почему подходит:</strong> {product.fit_reason}</p>}
+            {product.important_difference && <p><strong>Важно:</strong> {product.important_difference}</p>}
+          </div>
+        )}
+        {product?.url ? (
+          <a
+            className="product-card-link"
+            href={product.url}
+            rel="noopener noreferrer"
+            target="_blank"
+          >
+            Открыть официальную карточку <span aria-hidden="true">↗</span>
+          </a>
+        ) : (
+          <span className="product-card-link product-card-link--missing">Официальная карточка: информация не найдена</span>
+        )}
+      </div>
+    </article>
+  );
+}
+
 function MessageBubble({ message, onSuggestion, onRetry }) {
   const isUser = message.role === "user";
   const paragraphs = sanitizeAssistantText(message.content).split(/\n{2,}/);
@@ -147,6 +319,7 @@ function MessageBubble({ message, onSuggestion, onRetry }) {
         {paragraphs.map((paragraph, index) => (
           <p key={`${message.id}-paragraph-${index}`}>{paragraph}</p>
         ))}
+        {message.product && <ProductCard product={message.product} />}
         {message.suggestions && (
           <div className="suggestion-list" aria-label="Примеры запросов">
             {message.suggestions.map((suggestion) => (
@@ -321,6 +494,7 @@ function ChatWidget({ isOpen, onOpenChange }) {
     requestDemoAnswer(prompt, controller.signal)
       .then((answer) => {
         if (controller.signal.aborted) return;
+        const response = typeof answer === "string" ? { content: answer } : answer;
         pendingRef.current = null;
         window.clearTimeout(statusTimer);
         setPhase("idle");
@@ -329,7 +503,8 @@ function ChatWidget({ isOpen, onOpenChange }) {
           {
             id: `assistant-${Date.now()}`,
             role: "assistant",
-            content: sanitizeAssistantText(answer),
+            content: sanitizeAssistantText(response?.content),
+            product: response?.product,
             time: getTimeLabel(),
           },
         ]);
