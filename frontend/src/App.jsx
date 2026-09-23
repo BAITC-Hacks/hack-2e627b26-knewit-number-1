@@ -22,13 +22,11 @@ import {
 } from "./i18n.js";
 
 const MAX_MESSAGE_LENGTH = 1200;
-const TEXT_CONFIRMATIONS = new Set(["да", "подтверждаю", "добавить в корзину"]);
-const SAFE_ERROR_MESSAGE =
-  "Не удалось получить ответ. Проверьте соединение и попробуйте ещё раз.";
-const DEMO_PRODUCT_ID = 900001;
 const TEXT_CONFIRMATIONS = new Set([
   "да", "подтверждаю", "добавить в корзину", "иә", "растаймын", "себетке қосу", "себетке қосыңыз",
 ]);
+const SAFE_ERROR_MESSAGE =
+  "Не удалось получить ответ. Проверьте соединение и попробуйте ещё раз.";
 
 function safeErrorMessage(language = DEFAULT_LANGUAGE) {
   return getMessages(language).chat.responseError;
@@ -184,11 +182,7 @@ async function createAssistantResponse(prompt, signal, language = DEFAULT_LANGUA
     }
     const product = await getProduct(candidate.id, { signal });
     return {
-<<<<<<< HEAD
       content: "Нашёл товар в каталоге EKT.kz. Укажите количество и проверьте резюме перед добавлением:",
-=======
-      content: demo.product,
->>>>>>> 08b8f0d88828519e2b4e0a3a9b7070c5cc940700
       product: { ...product, verified_at: new Date().toISOString() },
     };
   }
@@ -1572,7 +1566,6 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
   );
 }
 
-<<<<<<< HEAD
 function catalogProductValue(product, key) {
   return product?.[key] ?? product?.normalized?.[key];
 }
@@ -1744,18 +1737,14 @@ function ProductDetailPage({ productId }) {
   );
 }
 
-function SitePreview({ cart, onOpenChat }) {
+function SitePreview({ cart, language, onLanguageRequest, onOpenChat }) {
+  const copy = getMessages(language).site;
   const categories = [
     ["Кабель / провод", "Кабель, провод и аксессуары", "#d9f3e9"],
     ["Светильники", "LED, лампы и управление светом", "#e3edff"],
     ["Низковольтная аппаратура", "Автоматика и защита сетей", "#fff0cc"],
     ["Монтаж и инструмент", "Всё для надёжного монтажа", "#f1e5ff"],
   ];
-=======
-function SitePreview({ cart, language, onLanguageRequest, onOpenChat }) {
-  const copy = getMessages(language).site;
-  const categories = copy.categories.map(([title, description], index) => [title, description, ["#d9f3e9", "#e3edff", "#fff0cc", "#f1e5ff"][index]]);
->>>>>>> 08b8f0d88828519e2b4e0a3a9b7070c5cc940700
   const cartCount = Array.isArray(cart?.items)
     ? cart.items.reduce((total, item) => total + (toFiniteNumber(item?.quantity) ?? 0), 0)
     : 0;
@@ -1897,24 +1886,19 @@ export default function App() {
 
   return (
     <>
-<<<<<<< HEAD
       {route === "#catalog" ? (
         <CatalogPage />
       ) : route.startsWith("#product/") ? (
         <ProductDetailPage productId={route.slice("#product/".length)} />
       ) : (
-        <SitePreview cart={cart} onOpenChat={() => setIsChatOpen(true)} />
+        <SitePreview
+          cart={cart}
+          language={language}
+          onLanguageRequest={setLanguageChangeRequest}
+          onOpenChat={() => setIsChatOpen(true)}
+        />
       )}
-      {showCookie && <CookieBanner onClose={() => setShowCookie(false)} />}
-=======
-      <SitePreview
-        cart={cart}
-        language={language}
-        onLanguageRequest={setLanguageChangeRequest}
-        onOpenChat={() => setIsChatOpen(true)}
-      />
       {showCookie && <CookieBanner language={language} onClose={() => setShowCookie(false)} />}
->>>>>>> 08b8f0d88828519e2b4e0a3a9b7070c5cc940700
       <ChatWidget
         cartStatus={cartStatus}
         isOpen={isChatOpen}
