@@ -555,3 +555,106 @@ describe("catalog facts in chat", () => {
     expect(within(analogCard).getByText("У аналога выше степень защиты.")).toBeInTheDocument();
   });
 });
+
+describe("chat attachments", () => {
+  beforeEach(() => {
+    document.cookie = "csrftoken=csrf-ui-token; path=/";
+  });
+
+  it("uploads an allowed file before sending its server-issued attachment id with the message", async () => {
+    const user = userEvent.setup();
+    installFetch((url, options) => {
+      if (url === "/api/dialog/uploads") {
+        expect(options.method).toBe("POST");
+        expect(options.body).toBeInstanceOf(FormData);
+        expect(options.body.get("file").name).toBe("brief.pdf");
+        return jsonResponse({ attachment: { id: "attachment-123", name: "brief.pdf", size: 12 } }, 201);
+      }
+      return jsonResponse({ error: { code: "unexpected" } }, 500);
+    }, (request) => request.attachment_id === "attachment-123" ? {
+      dialog_id: "dialog-test",
+      state: "done",
+      message: { id: "attachment-answer", role: "assistant", state: "done", content: "Файл принят." },
+    } : null);
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    await user.upload(document.getElementById("attachment-input"), new File(["test payload"], "brief.pdf", { type: "application/pdf" }));
+
+    expect(await screen.findByText(/Файл готов/)).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Введите сообщение"), "Проверьте документ");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => url === "/api/dialog/messages")).toBe(true));
+    const messageCall = fetch.mock.calls.find(([url]) => url === "/api/dialog/messages");
+    expect(JSON.parse(messageCall[1].body)).toMatchObject({ text: "Проверьте документ", attachment_id: "attachment-123" });
+    expect(await screen.findByText("Файл принят.")).toBeInTheDocument();
+    expect(screen.getByText("brief.pdf")).toBeInTheDocument();
+  });
+
+  it("rejects unsupported file types before making an upload request", async () => {
+    const user = userEvent.setup({ applyAccept: false });
+    installFetch();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    await user.upload(document.getElementById("attachment-input"), new File(["not an allowed image"], "photo.png", { type: "image/png" }));
+
+    expect(await screen.findByText(/Поддерживаются только PDF, DOCX, XLSX и JPEG/)).toBeInTheDocument();
+    expect(fetch.mock.calls.some(([url]) => url === "/api/dialog/uploads")).toBe(false);
+  });
+
+  it("keeps the server-issued attachment id when retrying a failed message", async () => {
+    const user = userEvent.setup();
+    let messageAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn((url, options = {}) => {
+      if (url === "/api/cart") return jsonResponse({ version: 0, currency: "KZT", items: [], total: "0.00", url: "/demo/cart/" });
+      if (url === "/api/dialog") return jsonResponse({ dialog_id: "dialog-test", state: "idle", history: [] });
+      if (url === "/api/dialog/uploads") return jsonResponse({ attachment: { id: "retry-attachment", name: "brief.pdf", size: 4 } }, 201);
+      if (url === "/api/dialog/messages") {
+        messageAttempts += 1;
+        return messageAttempts === 1
+          ? jsonResponse({ error: { code: "temporary_failure" } }, 503)
+          : jsonResponse({ dialog_id: "dialog-test", state: "done", message: { id: "retried", role: "assistant", content: "Файл обработан." } });
+      }
+      return jsonResponse({});
+    }));
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    await user.upload(document.getElementById("attachment-input"), new File(["file"], "brief.pdf", { type: "application/pdf" }));
+    await screen.findByText(/Файл готов/);
+    await user.type(screen.getByLabelText("Введите сообщение"), "Проверьте файл");
+    await user.keyboard("{Enter}");
+    await user.click(await screen.findByRole("button", { name: "Повторить" }));
+
+    expect(await screen.findByText("Файл обработан.")).toBeInTheDocument();
+    const messageBodies = fetch.mock.calls
+      .filter(([url]) => url === "/api/dialog/messages")
+      .map(([, options]) => JSON.parse(options.body));
+    expect(messageBodies).toEqual([
+      expect.objectContaining({ attachment_id: "retry-attachment" }),
+      expect.objectContaining({ attachment_id: "retry-attachment" }),
+    ]);
+  });
+
+  it("cancels a previous upload when the replacement file is invalid", async () => {
+    const user = userEvent.setup({ applyAccept: false });
+    let finishUpload;
+    installFetch((url) => {
+      if (url === "/api/dialog/uploads") return new Promise((resolve) => { finishUpload = resolve; });
+      return jsonResponse({});
+    });
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    await user.upload(document.getElementById("attachment-input"), new File(["file"], "original.pdf", { type: "application/pdf" }));
+    await screen.findByText(/Загружаем файл/);
+    await user.upload(document.getElementById("attachment-input"), new File(["file"], "invalid.png", { type: "image/png" }));
+    expect(await screen.findByText(/Поддерживаются только PDF, DOCX, XLSX и JPEG/)).toBeInTheDocument();
+
+    finishUpload(jsonResponse({ attachment: { id: "stale-upload", name: "original.pdf", size: 4 } }, 201));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText(/Поддерживаются только PDF, DOCX, XLSX и JPEG/)).toBeInTheDocument();
+    expect(screen.queryByText("original.pdf")).not.toBeInTheDocument();
+  });
+});

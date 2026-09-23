@@ -22,6 +22,14 @@ import {
 } from "./i18n.js";
 
 const MAX_MESSAGE_LENGTH = 1200;
+const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+const ATTACHMENT_TYPES = new Map([
+  ["application/pdf", "pdf"],
+  ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"],
+  ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"],
+  ["image/jpeg", "jpeg"],
+]);
+const ATTACHMENT_EXTENSIONS = new Set(["pdf", "docx", "xlsx", "jpg", "jpeg"]);
 const TEXT_CONFIRMATIONS = new Set([
   "да", "подтверждаю", "добавить в корзину", "иә", "растаймын", "себетке қосу", "себетке қосыңыз",
 ]);
@@ -209,7 +217,7 @@ function csrfToken() {
   return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : "";
 }
 
-async function requestAssistantAnswer(prompt, dialogId, signal, language = DEFAULT_LANGUAGE) {
+async function requestAssistantAnswer(prompt, dialogId, signal, language = DEFAULT_LANGUAGE, attachmentId = "") {
   const response = await fetch("/api/dialog/messages", {
     method: "POST",
     credentials: "same-origin",
@@ -218,7 +226,11 @@ async function requestAssistantAnswer(prompt, dialogId, signal, language = DEFAU
       "Content-Type": "application/json",
       ...(csrfToken() ? { "X-CSRFToken": csrfToken() } : {}),
     },
-    body: JSON.stringify({ text: prompt, ...(dialogId ? { dialog_id: dialogId } : {}) }),
+    body: JSON.stringify({
+      text: prompt,
+      ...(dialogId ? { dialog_id: dialogId } : {}),
+      ...(attachmentId ? { attachment_id: attachmentId } : {}),
+    }),
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
@@ -227,6 +239,45 @@ async function requestAssistantAnswer(prompt, dialogId, signal, language = DEFAU
     throw error;
   }
   return payload;
+}
+
+function attachmentExtension(file) {
+  return String(file?.name ?? "").toLowerCase().split(".").pop() || "";
+}
+
+function validateAttachment(file) {
+  if (!file) return "type";
+  if (!ATTACHMENT_TYPES.has(file.type) && !ATTACHMENT_EXTENSIONS.has(attachmentExtension(file))) return "type";
+  return file.size > MAX_ATTACHMENT_SIZE ? "size" : "";
+}
+
+function formatFileSize(size, language = DEFAULT_LANGUAGE) {
+  const bytes = Number(size);
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.ceil(bytes / 1024))} KB`;
+  return `${new Intl.NumberFormat(getLocale(language), { maximumFractionDigits: 1 }).format(bytes / (1024 * 1024))} MB`;
+}
+
+async function uploadAttachment(file, dialogId, signal) {
+  const body = new FormData();
+  body.append("file", file, file.name);
+  if (dialogId) body.append("dialog_id", dialogId);
+
+  const response = await fetch("/api/dialog/uploads", {
+    method: "POST",
+    credentials: "same-origin",
+    signal,
+    headers: csrfToken() ? { "X-CSRFToken": csrfToken() } : {},
+    body,
+  });
+  const payload = await response.json().catch(() => null);
+  const attachment = payload?.attachment ?? payload;
+  if (!response.ok || !attachment?.id) {
+    const error = new Error("attachment_upload_failed");
+    error.code = payload?.error?.code;
+    throw error;
+  }
+  return attachment;
 }
 
 async function requestDialogState(signal) {
@@ -258,6 +309,7 @@ function Icon({ name, size = 18 }) {
     sparkle: <><path d="m12 3 1.2 4.8L18 9l-4.8 1.2L12 15l-1.2-4.8L6 9l4.8-1.2L12 3ZM19 15l.6 2.4L22 18l-2.4.6L19 21l-.6-2.4L16 18l2.4-.6L19 15Z" /></>,
     check: <path d="m5 12 4.2 4.2L19 6.5" />,
     alert: <><path d="M12 4 3.3 19h17.4L12 4Z" /><path d="M12 9v4M12 16h.01" /></>,
+    attachment: <><path d="m19.5 12.5-7.8 7.8a5 5 0 0 1-7.1-7.1l8.5-8.5a3.5 3.5 0 0 1 5 5L9.5 18.3a2 2 0 1 1-2.8-2.8l7.8-7.8" /></>,
   };
 
   return (
@@ -797,6 +849,13 @@ function MessageBubble({
         {paragraphs.map((paragraph, index) => (
           <p key={`${message.id}-paragraph-${index}`}>{paragraph}</p>
         ))}
+        {message.attachment && (
+          <div className="message-attachment" aria-label={`${copy.attachmentReady}: ${message.attachment.name || message.attachment.file?.name}`}>
+            <Icon name="attachment" size={14} />
+            <span>{message.attachment.name || message.attachment.file?.name}</span>
+            <small>{formatFileSize(message.attachment.size ?? message.attachment.file?.size, language)}</small>
+          </div>
+        )}
         {message.product && (
           <ProductCard
             cartStatus={cartStatus}
@@ -919,10 +978,13 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
   const copy = getMessages(language);
   const [messages, setMessages] = useState(() => [createWelcomeMessage(language)]);
   const [inputValue, setInputValue] = useState("");
+  const [attachment, setAttachment] = useState(null);
   const [phase, setPhase] = useState("idle");
   const [cartRequest, setCartRequest] = useState(null);
   const [isClearDialogOpen, setIsClearDialogOpen] = useState(false);
   const inputRef = useRef(null);
+  const attachmentInputRef = useRef(null);
+  const attachmentUploadRef = useRef(null);
   const launcherRef = useRef(null);
   const clearButtonRef = useRef(null);
   const bodyRef = useRef(null);
@@ -997,6 +1059,7 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
   useEffect(() => () => {
     pendingRef.current?.controller.abort();
     if (pendingRef.current?.statusTimer) window.clearTimeout(pendingRef.current.statusTimer);
+    attachmentUploadRef.current?.abort();
   }, []);
 
   const updateCartFromPayload = useCallback((payload) => {
@@ -1325,11 +1388,13 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
     ]);
   }, [copy.chat.stopped, language]);
 
-  const sendPrompt = useCallback((rawPrompt, { isRetry = false, errorId = "" } = {}) => {
+  const sendPrompt = useCallback((rawPrompt, { attachment: selectedAttachment = null, isRetry = false, errorId = "" } = {}) => {
     const prompt = String(rawPrompt).trim().slice(0, MAX_MESSAGE_LENGTH);
-    if (!prompt || pendingRef.current || cartLockRef.current) return;
+    if ((!prompt && !selectedAttachment) || pendingRef.current || cartLockRef.current) return;
+    const messageText = prompt || copy.chat.attachmentPrompt;
 
     setInputValue("");
+    setAttachment(null);
     setMessages((current) => {
       const withoutError = isRetry ? current.filter((message) => message.id !== errorId) : current;
       return [
@@ -1337,13 +1402,14 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
         {
           id: createId("user"),
           role: "user",
-          content: prompt,
-        time: getTimeLabel(language),
+          content: messageText,
+          attachment: selectedAttachment,
+          time: getTimeLabel(language),
         },
       ];
     });
 
-    if (TEXT_CONFIRMATIONS.has(normalizeConfirmation(prompt, language))) {
+    if (!selectedAttachment && TEXT_CONFIRMATIONS.has(normalizeConfirmation(prompt, language))) {
       void confirmByText(prompt);
       return;
     }
@@ -1352,7 +1418,7 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
     const statusTimer = window.setTimeout(() => setPhase("processing"), 280);
     pendingRef.current = { controller, statusTimer };
     setPhase("submitting");
-    requestAssistantAnswer(prompt, dialogIdRef.current, controller.signal, language)
+    requestAssistantAnswer(messageText, dialogIdRef.current, controller.signal, language, selectedAttachment?.uploadId)
       .then((answer) => {
         if (controller.signal.aborted) return;
         const response = answer?.message ?? {};
@@ -1387,16 +1453,21 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
             content: safeErrorMessage(language),
             error: true,
             retryPrompt: prompt,
+            retryAttachment: selectedAttachment,
             time: getTimeLabel(language),
           },
         ]);
       });
-  }, [confirmByText, language]);
+  }, [confirmByText, copy.chat.attachmentPrompt, language]);
 
   const clearHistory = useCallback(() => {
     if (pendingRef.current) cancelGeneration();
     setMessages([createWelcomeMessage(language)]);
     setInputValue("");
+    attachmentUploadRef.current?.abort();
+    attachmentUploadRef.current = null;
+    setAttachment(null);
+    if (attachmentInputRef.current) attachmentInputRef.current.value = "";
     setPhase("idle");
     setCartRequest(null);
     cartLockRef.current = false;
@@ -1414,8 +1485,55 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
 
   const handleSubmit = (event) => {
     event.preventDefault();
-    sendPrompt(inputValue);
+    if (attachment?.status === "ready") {
+      sendPrompt(inputValue, { attachment });
+    } else {
+      sendPrompt(inputValue);
+    }
   };
+
+  const clearAttachment = useCallback(() => {
+    attachmentUploadRef.current?.abort();
+    attachmentUploadRef.current = null;
+    setAttachment(null);
+    if (attachmentInputRef.current) attachmentInputRef.current.value = "";
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
+
+  const selectAttachment = useCallback((event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    attachmentUploadRef.current?.abort();
+    attachmentUploadRef.current = null;
+    const validationError = validateAttachment(file);
+    if (validationError) {
+      setAttachment({ file, status: "error", error: validationError });
+      return;
+    }
+
+    const controller = new AbortController();
+    attachmentUploadRef.current = controller;
+    setAttachment({ file, status: "uploading" });
+    uploadAttachment(file, dialogIdRef.current, controller.signal)
+      .then((uploaded) => {
+        if (attachmentUploadRef.current !== controller) return;
+        attachmentUploadRef.current = null;
+        setAttachment({
+          file,
+          status: "ready",
+          uploadId: uploaded.id,
+          name: uploaded.name || file.name,
+          size: uploaded.size ?? file.size,
+        });
+      })
+      .catch((error) => {
+        if (error?.name === "AbortError" || attachmentUploadRef.current !== controller) return;
+        attachmentUploadRef.current = null;
+        setAttachment({ file, status: "error", error: "upload" });
+      });
+  }, []);
 
   const statusLabel = cartRequest
     ? copy.chat.status.cart
@@ -1507,7 +1625,8 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
                 onCreateProposal={createProposal}
                 onRetry={(prompt, errorId) => {
                   setPhase("idle");
-                  sendPrompt(prompt, { errorId, isRetry: true });
+                  const failedMessage = messages.find((message) => message.id === errorId);
+                  sendPrompt(prompt, { attachment: failedMessage?.retryAttachment, errorId, isRetry: true });
                 }}
                 onSuggestion={sendPrompt}
               />
@@ -1520,10 +1639,62 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
               <Icon name="sparkle" size={13} />
               {copy.chat.catalogBasis}
             </p>
+            {attachment && (
+              <div
+                aria-live="polite"
+                className={`attachment-status attachment-status--${attachment.status}`}
+                role={attachment.status === "error" ? "alert" : "status"}
+              >
+                <Icon name="attachment" size={15} />
+                <span className="attachment-status-copy">
+                  <strong>{attachment.name || attachment.file?.name}</strong>
+                  <small>
+                    {attachment.status === "uploading"
+                      ? copy.chat.attachmentUploading
+                      : attachment.status === "ready"
+                        ? `${copy.chat.attachmentReady} · ${formatFileSize(attachment.size ?? attachment.file?.size, language)}`
+                        : attachment.error === "size"
+                          ? copy.chat.attachmentSizeError
+                          : attachment.error === "type"
+                            ? copy.chat.attachmentTypeError
+                            : copy.chat.attachmentUploadError}
+                  </small>
+                </span>
+                <button
+                  aria-label={copy.chat.attachmentRemove}
+                  className="attachment-remove"
+                  onClick={clearAttachment}
+                  type="button"
+                >
+                  <Icon name="close" size={14} />
+                </button>
+              </div>
+            )}
             <form className="chat-composer" onSubmit={handleSubmit}>
               <label className="sr-only" htmlFor="message-input">{copy.chat.inputLabel}</label>
+              <input
+                accept=".pdf,.docx,.xlsx,.jpg,.jpeg,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/jpeg"
+                aria-hidden="true"
+                className="sr-only"
+                disabled={Boolean(pendingRef.current) || Boolean(cartRequest)}
+                id="attachment-input"
+                onChange={selectAttachment}
+                ref={attachmentInputRef}
+                tabIndex={-1}
+                type="file"
+              />
+              <button
+                aria-label={copy.chat.attachmentAdd}
+                className="attachment-button"
+                disabled={Boolean(pendingRef.current) || Boolean(cartRequest)}
+                onClick={() => attachmentInputRef.current?.click()}
+                title={copy.chat.attachmentAdd}
+                type="button"
+              >
+                <Icon name="attachment" size={17} />
+              </button>
               <textarea
-                aria-describedby="composer-disclaimer"
+                aria-describedby="composer-disclaimer attachment-help"
                 autoComplete="off"
                 disabled={Boolean(pendingRef.current) || Boolean(cartRequest)}
                 id="message-input"
@@ -1532,7 +1703,11 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
-                    sendPrompt(inputValue);
+                    if (attachment?.status === "ready") {
+                      sendPrompt(inputValue, { attachment });
+                    } else {
+                      sendPrompt(inputValue);
+                    }
                   }
                 }}
                 placeholder={copy.chat.placeholder}
@@ -1545,7 +1720,7 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
                 <button
                   aria-label={copy.chat.send}
                   className="send-button"
-                  disabled={Boolean(pendingRef.current) || Boolean(cartRequest) || !inputValue.trim()}
+                  disabled={Boolean(pendingRef.current) || Boolean(cartRequest) || attachment?.status === "uploading" || (!inputValue.trim() && attachment?.status !== "ready")}
                   type="submit"
                 >
                   <Icon name="arrow" size={17} />
@@ -1555,6 +1730,7 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
             <p className="composer-disclaimer" id="composer-disclaimer">
               {copy.chat.disclaimer}
             </p>
+            <p className="attachment-help" id="attachment-help">{copy.chat.attachmentHelp}</p>
           </div>
         </aside>
       )}
