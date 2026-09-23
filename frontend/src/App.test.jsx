@@ -44,14 +44,48 @@ function jsonResponse(payload, status = 200) {
   }));
 }
 
-function installFetch(handler = () => jsonResponse({})) {
+function installFetch(handler = () => jsonResponse({}), dialogHandler) {
   vi.stubGlobal("fetch", vi.fn((url, options = {}) => {
     if (url === "/api/cart" && (!options.method || options.method === "GET")) {
       return jsonResponse({ version: 0, currency: "KZT", items: [], total: "0.00", url: "/demo/cart/" });
     }
+    if (url === "/api/dialog" && (!options.method || options.method === "GET")) {
+      return jsonResponse({ dialog_id: "dialog-test", state: "idle", history: [] });
+    }
     if (String(url).startsWith("/api/products/detail")) return jsonResponse(PRODUCT);
+    if (url === "/api/dialog/messages") {
+      const request = JSON.parse(options.body || "{}");
+      const dialogPayload = dialogHandler?.(request);
+      if (dialogPayload) return jsonResponse(dialogPayload);
+      return jsonResponse({
+        dialog_id: "dialog-test",
+        state: "done",
+        message: {
+          id: "assistant-from-api",
+          role: "assistant",
+          state: "done",
+          content: request.text === "Хочу купить" ? "Уточните, какой товар вам нужен." : "Нашёл товар в каталоге.",
+          products: /автомат|legrand/i.test(request.text || "") ? [PRODUCT] : [],
+        },
+      });
+    }
     return handler(url, options);
   }));
+}
+
+function dialogProposalResponse(proposal) {
+  return {
+    dialog_id: "dialog-test",
+    state: "done",
+    message: {
+      id: "assistant-proposal-from-api",
+      role: "assistant",
+      state: "done",
+      content: "Подготовил предложение добавить 2 шт. выбранного товара. Подтвердите добавление явно.",
+      products: [PRODUCT],
+      cart_proposal: proposal,
+    },
+  };
 }
 
 async function openProductCard(user) {
@@ -111,6 +145,86 @@ describe("cart confirmation flow", () => {
     );
   });
 
+  it("renders a server-issued proposal from a text command and confirms its exact action", async () => {
+    const user = userEvent.setup();
+    const proposal = action({ action_id: "dialog-action" });
+    installFetch((url) => {
+      if (url === "/api/cart/actions/dialog-action/confirm") {
+        return jsonResponse({
+          action_id: "dialog-action",
+          status: "succeeded",
+          added_quantity: 2,
+          cart: {
+            version: 1,
+            currency: "KZT",
+            total: "1834.00",
+            url: "/demo/cart/",
+            items: [{ product_id: PRODUCT.id, quantity: 2, unit_price: "917.00", product: PRODUCT }],
+          },
+        });
+      }
+      return jsonResponse({ error: { code: "unexpected" } }, 500);
+    }, (request) => request.text === "добавь два" ? dialogProposalResponse(proposal) : null);
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    const input = screen.getByLabelText("Введите сообщение");
+    await user.type(input, "добавь два");
+    await user.keyboard("{Enter}");
+
+    const summary = await screen.findByLabelText("Резюме добавления в корзину");
+    expect(summary).toHaveAttribute("data-action-id", "dialog-action");
+    expect(within(summary).getByText("2 шт.")).toBeInTheDocument();
+    expect(fetch.mock.calls.filter(([url]) => url === "/api/cart/actions")).toHaveLength(0);
+
+    await user.click(within(summary).getByRole("button", { name: "Подтвердить и добавить" }));
+
+    expect(await screen.findByText("Добавлено: 2 шт.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Открыть корзину, товаров: 2/ })).toHaveAttribute("href", "/demo/cart/");
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/cart/actions/dialog-action/confirm",
+      expect.objectContaining({ method: "POST", body: "{}" }),
+    );
+  });
+
+  it("confirms a server-issued proposal when the user explicitly replies yes", async () => {
+    const user = userEvent.setup();
+    const proposal = action({ action_id: "dialog-text-action" });
+    installFetch((url) => {
+      if (url === "/api/cart/actions/confirm-text") {
+        return jsonResponse({
+          action_id: "dialog-text-action",
+          status: "succeeded",
+          added_quantity: 2,
+          cart: {
+            version: 1,
+            currency: "KZT",
+            total: "1834.00",
+            url: "/demo/cart/",
+            items: [{ product_id: PRODUCT.id, quantity: 2, unit_price: "917.00", product: PRODUCT }],
+          },
+        });
+      }
+      return jsonResponse({ error: { code: "unexpected" } }, 500);
+    }, (request) => request.text === "добавь два" ? dialogProposalResponse(proposal) : null);
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    const input = screen.getByLabelText("Введите сообщение");
+    await user.type(input, "добавь два");
+    await user.keyboard("{Enter}");
+    await screen.findByLabelText("Резюме добавления в корзину");
+
+    await user.type(input, "да");
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByText("Добавлено: 2 шт.")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/cart/actions/confirm-text",
+      expect.objectContaining({ method: "POST", body: expect.stringContaining('"text":"да"') }),
+    );
+  });
+
   it("renders a separately confirmable replacement when stock is insufficient", async () => {
     const user = userEvent.setup();
     const replacement = action({ action_id: "action-replacement", quantity: 8, total: "7336.00", message_version: 2 });
@@ -149,6 +263,19 @@ describe("cart confirmation flow", () => {
         return cartReads === 1
           ? jsonResponse({ error: { code: "temporary_failure" } }, 503)
           : jsonResponse({ items: [], total: "0.00", url: "/demo/cart/" });
+      }
+      if (url === "/api/dialog/messages") {
+        return jsonResponse({
+          dialog_id: "dialog-test",
+          state: "done",
+          message: {
+            id: "assistant-from-api",
+            role: "assistant",
+            state: "done",
+            content: "Нашёл товар в каталоге.",
+            products: [PRODUCT],
+          },
+        });
       }
       if (String(url).startsWith("/api/products/detail")) return jsonResponse(PRODUCT);
       if (url === "/api/cart/actions") return jsonResponse(action({ quantity: 1, total: "917.00" }), 201);
@@ -291,7 +418,7 @@ describe("cart confirmation flow", () => {
     await user.type(input, "Хочу купить");
     await user.keyboard("{Enter}");
 
-    expect(await screen.findByText(/демонстрационный каркас чата/i, {}, { timeout: 2500 })).toBeInTheDocument();
+    expect(await screen.findByText("Уточните, какой товар вам нужен.", {}, { timeout: 2500 })).toBeInTheDocument();
     expect(fetch.mock.calls.some(([url]) => url === "/api/cart/actions/confirm-text")).toBe(false);
   });
 
@@ -314,5 +441,117 @@ describe("cart confirmation flow", () => {
 
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
     await waitFor(() => expect(clearButton).toHaveFocus());
+  });
+
+  it("switches the interface to kk-KZ and safely expires an active cart proposal", async () => {
+    const user = userEvent.setup();
+    installFetch((url) => {
+      if (url === "/api/cart/actions") return jsonResponse(action(), 201);
+      if (url === "/api/chat/language") {
+        return jsonResponse({
+          language: "kk",
+          language_changed: true,
+          cart_summary: {
+            message: "Себеттің белсенді ұсынысы тоқтатылды. Қазақ тілінде жаңа қорытынды жасаңыз.",
+            requires_new_proposal: true,
+          },
+        });
+      }
+      return jsonResponse({}, 500);
+    });
+
+    const card = await openProductCard(user);
+    await user.click(within(card).getByRole("button", { name: /добавить/i }));
+    const summary = await screen.findByLabelText("Резюме добавления в корзину");
+    await user.click(screen.getByRole("button", { name: "Қазақша" }));
+
+    expect((await screen.findAllByText(/Себеттің белсенді ұсынысы тоқтатылды/i)).length).toBeGreaterThanOrEqual(1);
+    expect(within(summary).getByRole("button")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Қазақша" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /Кеңесші чатын жабу/i })).toBeInTheDocument();
+    expect(fetch.mock.calls.filter(([url]) => url === "/api/chat/language").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("uses the site-level language switch before the chat is opened", async () => {
+    const user = userEvent.setup();
+    installFetch();
+    render(<App />);
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/cart", expect.anything()));
+    await user.click(screen.getByRole("button", { name: "Қазақша" }));
+    await user.click(screen.getByRole("button", { name: /Кеңесші чатын ашу/i }));
+
+    expect(await screen.findByText(/Сәлеметсіз бе!/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Қазақша" })).toHaveAttribute("aria-pressed", "true");
+  });
+});
+
+describe("catalog facts in chat", () => {
+  beforeEach(() => {
+    document.cookie = "csrftoken=csrf-ui-token; path=/";
+  });
+
+  it("renders verified detail facts, safe document links, and the server's analog comparison", async () => {
+    const user = userEvent.setup();
+    const detailProduct = {
+      ...PRODUCT,
+      quantity: 99,
+      availability: { status: "unavailable", sellable_quantity: 0 },
+      properties: { TORGOVAYA_MARKA: "IEK", POWER: "18W" },
+      certificates: [
+        { name: "Сертификат соответствия", url: "https://ekt.kz/docs/certificate.pdf" },
+        { name: "Небезопасный файл", url: "javascript:alert(1)" },
+      ],
+    };
+    const comparison = {
+      source_product: detailProduct,
+      analog: {
+        ...PRODUCT,
+        id: 900002,
+        name: "Светильник LED ДПО 18W IEK",
+        article: "ДЕМО-03-002",
+        price: 1200,
+        availability: { status: "available", sellable_quantity: 3, unit: "шт." },
+        data_status: "live",
+      },
+      why_fits: "Совпадают мощность и назначение.",
+      matching_parameters: [{ parameter: "power", source: "18W", candidate: "18W" }],
+      differences: [{ parameter: "ip_rating", source: "IP44", candidate: "IP65", kind: "higher_protection" }],
+    };
+    installFetch(undefined, (request) => {
+      if (request.text === "покажи детали") {
+        return {
+          dialog_id: "dialog-test",
+          state: "done",
+          message: { id: "details", role: "assistant", state: "done", content: "Детали товара.", products: [detailProduct] },
+        };
+      }
+      if (request.text === "подбери аналог") {
+        return {
+          dialog_id: "dialog-test",
+          state: "done",
+          message: { id: "analog", role: "assistant", state: "done", content: "Подобрал аналог.", analog_comparison: comparison },
+        };
+      }
+      return null;
+    });
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    const input = screen.getByLabelText("Введите сообщение");
+
+    await user.type(input, "покажи детали");
+    await user.keyboard("{Enter}");
+    const card = await screen.findByRole("article", { name: /Автоматический выключатель/ });
+    expect(within(card).getByText("Нет в наличии")).toBeInTheDocument();
+    expect(within(card).getByText("18W")).toBeInTheDocument();
+    expect(within(card).getByRole("link", { name: /Сертификат соответствия/ })).toHaveAttribute("href", "https://ekt.kz/docs/certificate.pdf");
+    expect(within(card).queryByRole("link", { name: /Небезопасный файл/ })).not.toBeInTheDocument();
+
+    await user.type(input, "подбери аналог");
+    await user.keyboard("{Enter}");
+    const analogCard = await screen.findByRole("article", { name: /Сравнение аналога/ });
+    expect(within(analogCard).getByText("Совпадают мощность и назначение.")).toBeInTheDocument();
+    expect(within(analogCard).getByText("Мощность")).toBeInTheDocument();
+    expect(within(analogCard).getByText("У аналога выше степень защиты.")).toBeInTheDocument();
   });
 });

@@ -52,6 +52,14 @@ Product detail responses keep every original provider field and add a separate
 raw properties plus approved normalized attributes, opaque `offers`, and source
 timestamps. When the source omits currency, `CATALOG_DEFAULT_CURRENCY` is used;
 missing price, unit, step, and source update time remain `null`.
+
+Provider contract tests are shared by fixture and live adapters; their
+intentional differences are documented in
+[docs/catalog-provider-contract.md](docs/catalog-provider-contract.md). The
+P0+WIN acceptance evidence is versioned in
+[docs/acceptance-matrix.md](docs/acceptance-matrix.md). The executable sample
+contains 200 requests with the required 20% exact article/ID, 25% name/typo,
+30% characteristic, and 25% absence/analog quotas.
 ## Observability
 
 `/health` is a liveness probe and does not call the upstream catalog. `/ready`

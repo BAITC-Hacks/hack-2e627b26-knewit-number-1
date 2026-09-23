@@ -12,6 +12,7 @@ from dialog.llm import (
     LLMProtocolError,
     OpenAIResponsesOrchestrator,
     SAFE_REFUSAL_RU,
+    ToolTrace,
     compose_message,
 )
 from dialog.tools import DialogToolRegistry, TOOL_DEFINITIONS, ToolValidationError
@@ -275,6 +276,52 @@ class OpenAIOrchestratorTests(SimpleTestCase):
         self.assertEqual(message["content"], SAFE_REFUSAL_RU)
         self.assertIsNone(message["recommendation"])
         self.assertEqual(message["source_status"], "missing")
+
+    def test_compose_includes_a_safe_analog_comparison_for_the_selected_product(self):
+        source = {"id": 1, "name": "Source lamp", "article": "SOURCE-1"}
+        analog = {
+            "id": 2,
+            "name": "Analog lamp",
+            "article": "ANALOG-1",
+            "price": 1200,
+            "availability": {"status": "available", "sellable_quantity": 3},
+        }
+        message = compose_message(
+            {
+                "response_kind": "answer",
+                "selected_product_ids": [2],
+                "recommendation": "Подходит.",
+                "recommendation_reason": "Проверен.",
+                "clarifying_questions": [],
+                "source_status": "sourced",
+            },
+            [
+                ToolTrace(
+                    name="find_analogs",
+                    result={
+                        "untrusted_data": {
+                            "source_product": source,
+                            "analogs": [
+                                {
+                                    "product": analog,
+                                    "explanation": "Совпадает мощность.",
+                                    "comparison": {
+                                        "matched": [{"parameter": "power", "source": "18W", "candidate": "18W"}],
+                                        "differences": [{"parameter": "ip_rating", "source": "IP44", "candidate": "IP65", "kind": "higher_protection"}],
+                                    },
+                                    "source_ref": "/api/products/detail?id=2",
+                                }
+                            ],
+                        }
+                    },
+                )
+            ],
+        )
+        comparison = message["analog_comparison"]
+        self.assertEqual(comparison["source_product"]["id"], 1)
+        self.assertEqual(comparison["analog"]["id"], 2)
+        self.assertEqual(comparison["matching_parameters"][0]["parameter"], "power")
+        self.assertEqual(comparison["differences"][0]["kind"], "higher_protection")
 
 
 class DialogLLMApiTests(TestCase):
