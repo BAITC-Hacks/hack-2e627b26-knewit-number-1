@@ -255,3 +255,51 @@ button:focus-visible, a:focus-visible, textarea:focus-visible { outline: 3px sol
 @media (max-height: 640px) {
   .chat-widget { top: 10px; bottom: 10px; height: auto; min-height: 0; max-height: none; }
 }
+
+/* EKT-inspired utility header and a richer, conversion-focused footer. */
+.site-utility { position: relative; z-index: 3; min-height: 34px; color: #c7d8ef; background: #081a31; font-size: 10px; }
+.site-utility-inner { display: flex; align-items: center; gap: 22px; max-width: 1280px; min-height: 34px; margin: 0 auto; padding: 0 32px; }
+.site-utility-location { display: inline-flex; align-items: center; gap: 7px; color: #f2f7ff; font-weight: 800; }
+.utility-dot { width: 6px; height: 6px; border-radius: 50%; background: #62d49c; box-shadow: 0 0 0 4px rgba(98,212,156,.14); }
+.site-utility-message { color: #8da6c7; }
+.site-utility-inner a { margin-left: auto; color: #b9d7ff; font-weight: 750; text-decoration: none; }
+.site-utility-inner a:hover { color: #fff; }
+.site-nav { height: 78px; border-bottom-color: rgba(204, 220, 239, .72); background: rgba(255,255,255,.9); }
+.site-nav-links { gap: 27px; }
+.site-nav-links a { position: relative; padding: 29px 0 27px; }
+.site-nav-links a::after { position: absolute; right: 0; bottom: 20px; left: 0; height: 2px; border-radius: 2px; background: var(--blue); content: ""; opacity: 0; transform: scaleX(.45); transition: opacity .2s, transform .2s; }
+.site-nav-links a:hover::after { opacity: 1; transform: scaleX(1); }
+.cart-button { border-color: #c8d8e9; color: #fff; background: var(--navy); box-shadow: 0 8px 18px rgba(12,29,53,.16); }
+.cart-button:hover { background: var(--blue-dark); }
+.site-footer { color: #c3d0e3; background: #081a31; }
+.site-footer-main { display: grid; grid-template-columns: minmax(220px, 1.5fr) repeat(2, minmax(130px, .75fr)) minmax(230px, 1fr); gap: clamp(28px, 5vw, 74px); max-width: 1280px; margin: 0 auto; padding: 62px 32px 52px; }
+.brand--footer { color: #fff; }
+.brand--footer .brand-mark { color: #09203e; background: #7fd5ad; }
+.site-footer-brand p { max-width: 285px; margin: 19px 0 20px; color: #8fa4c1; font-size: 12px; line-height: 1.6; }
+.footer-phone { display: block; color: #fff; font-size: 16px; font-weight: 800; text-decoration: none; }
+.footer-hours { display: block; margin-top: 6px; color: #7890b0; font-size: 10px; }
+.site-footer-column { display: grid; align-content: start; gap: 12px; }
+.site-footer-column h3 { margin: 2px 0 8px; color: #fff; font-size: 12px; letter-spacing: .04em; }
+.site-footer-column a { color: #8fa4c1; font-size: 11px; text-decoration: none; }
+.site-footer-column a:hover { color: #b9d7ff; }
+.site-footer-contact { align-self: start; padding: 19px; border: 1px solid rgba(139,173,213,.2); border-radius: 17px; background: linear-gradient(145deg, rgba(26,57,94,.85), rgba(10,32,59,.76)); }
+.footer-kicker { display: block; margin-bottom: 7px; color: #77d2a4; font-size: 9px; font-weight: 850; letter-spacing: .14em; text-transform: uppercase; }
+.site-footer-contact strong { display: block; color: #fff; font-size: 17px; letter-spacing: -.03em; }
+.site-footer-contact p { margin: 8px 0 17px; color: #99b0cc; font-size: 10px; line-height: 1.45; }
+.site-footer-contact button { border: 0; border-radius: 9px; padding: 10px 12px; color: #09203e; background: #9ee5c2; font-size: 11px; font-weight: 850; }
+.site-footer-contact button:hover { background: #c4f2d9; transform: translateY(-1px); }
+.site-footer-contact button span { margin-left: 8px; font-size: 14px; }
+.site-footer-bottom { display: flex; align-items: center; justify-content: space-between; gap: 18px; max-width: 1280px; margin: 0 auto; padding: 19px 32px; border-top: 1px solid rgba(139,173,213,.16); color: #7188a6; font-size: 10px; }
+.site-footer-bottom a { color: #8fa4c1; text-decoration: none; }
+.site-footer-bottom a:hover { color: #fff; }
+
+@media (max-width: 800px) {
+  .site-utility-message { display: none; }
+  .site-utility-inner { justify-content: space-between; padding: 0 18px; }
+  .site-nav { height: 64px; }
+  .site-nav-links a { padding: 0; }
+  .site-nav-links a::after { display: none; }
+  .site-footer-main { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 46px 22px 38px; }
+  .site-footer-brand, .site-footer-contact { grid-column: 1 / -1; }
+  .site-footer-bottom { align-items: flex-start; flex-direction: column; padding: 18px 22px; }
+}

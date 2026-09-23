@@ -12,14 +12,17 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 
 from cart.errors import CartApiError
 from cart.service import action_snapshot, create_action, owner_key_for_session
+from catalog.errors import CatalogError
+from catalog.providers import get_catalog_provider
 from catalog.search import SearchIndexError, search_catalog, semantic_search_catalog
-from catalog.safety import sanitize_catalog_payload, sanitize_text
+from catalog.safety import sanitize_catalog_payload, sanitize_text, sanitize_url
 from config.observability import observe_latency, record_event, record_metric
 from dialog.attachments import AttachmentError, extract_attachment
 from dialog.llm import (
     LLMError,
     OpenAIResponsesOrchestrator,
     PROCESSING_TOKEN_RU,
+    _catalog_identifier,
     llm_is_configured,
 )
 from dialog.payment_safety import (
@@ -57,6 +60,16 @@ _PRODUCT_CLARIFICATION_PHRASES = {
 }
 _REFERENCE_WORDS = ("этот товар", "этот вариант", "эту позицию", "этот")
 _SECOND_WORDS = ("второй", "2-й", "2й")
+_DOCUMENT_FIELDS = {
+    "certificate": "Сертификат",
+    "certificates": "Сертификат",
+    "document": "Документ",
+    "documents": "Документ",
+    "instruction": "Инструкция",
+    "instructions": "Инструкция",
+    "file": "Файл",
+    "files": "Файл",
+}
 
 
 def _welcome() -> dict[str, Any]:
@@ -206,6 +219,117 @@ def _search_answer(text: str) -> tuple[str, list[dict[str, Any]]]:
     return f"Нашёл {len(products)} вариант(а). Уточните, какой товар использовать дальше.", products
 
 
+def _catalog_detail(product_id: Any) -> dict[str, Any] | None:
+    """Fetch the selected product from the detail API, never from the search index."""
+    if isinstance(product_id, bool) or not isinstance(product_id, int) or product_id < 1:
+        return None
+    try:
+        product = get_catalog_provider().get_product(product_id)
+    except (CatalogError, KeyError, TypeError, ValueError):
+        return None
+    if not isinstance(product, dict) or product.get("id") != product_id:
+        return None
+    return sanitize_catalog_payload(product)
+
+
+def _document_links(product: dict[str, Any]) -> list[dict[str, str]]:
+    """Normalize only safe, renderable document URLs from catalog detail data."""
+    links: list[dict[str, str]] = []
+
+    def add(value: Any, default_label: str) -> None:
+        if isinstance(value, str):
+            url = sanitize_url(value)
+            if url:
+                links.append({"label": default_label, "url": url})
+            return
+        if isinstance(value, list):
+            for item in value:
+                add(item, default_label)
+            return
+        if not isinstance(value, dict):
+            return
+        label = sanitize_text(value.get("name") or value.get("title") or default_label)
+        for key in ("url", "href", "link"):
+            raw_url = value.get(key)
+            if isinstance(raw_url, str):
+                url = sanitize_url(raw_url)
+                if url:
+                    links.append({"label": label or default_label, "url": url})
+                    return
+
+    for field, label in _DOCUMENT_FIELDS.items():
+        add(product.get(field), label)
+    properties = product.get("properties")
+    if isinstance(properties, dict):
+        for key, value in properties.items():
+            normalized_key = str(key).casefold()
+            if any(token in normalized_key for token in ("cert", "сертифик", "document", "документ", "instruction", "инструкц")):
+                add(value, "Документ")
+
+    unique: list[dict[str, str]] = []
+    for link in links:
+        if link not in unique:
+            unique.append(link)
+    return unique[:10]
+
+
+def _detail_answer(product: dict[str, Any]) -> dict[str, Any]:
+    """Render deterministic, verified catalog facts for a chosen product."""
+    product_id = product["id"]
+    availability = product.get("availability")
+    characteristics = product.get("properties")
+    documents = _document_links(product)
+    fact: dict[str, Any] = {
+        "type": "product",
+        "product_id": product_id,
+        "source": "catalog_detail_api",
+        "name": product.get("name"),
+        "article": product.get("article"),
+        "availability": availability if isinstance(availability, dict) else None,
+        "characteristics": characteristics if isinstance(characteristics, dict) else {},
+        "card_url": product.get("url"),
+    }
+    if documents:
+        fact["documents"] = documents
+    name = sanitize_text(product.get("name") or "выбранный товар")
+    content = f"Проверил актуальные данные для «{name}». Наличие и характеристики приведены ниже."
+    if documents:
+        content += " Также доступны ссылки на сертификаты или документы."
+    return {
+        "content": content,
+        "products": [product],
+        "facts": [fact],
+        "sources": [{"type": "catalog_detail", "url": f"/api/products/detail?id={product_id}"}],
+        "source_status": "sourced",
+    }
+
+
+def _missing_detail_answer() -> dict[str, Any]:
+    """Do not fall back to an unverified search snapshot for a chosen product."""
+    return {
+        "content": "Не удалось проверить актуальные данные выбранного товара. Попробуйте ещё раз.",
+        "products": [],
+        "facts": [],
+        "source_status": "missing",
+    }
+
+
+def _numeric_product_id(text: str) -> int | None:
+    """An all-numeric dialog turn can be a selected internal product ID."""
+    if not re.fullmatch(r"\d+", text.strip()):
+        return None
+    try:
+        product_id = int(text)
+    except ValueError:
+        return None
+    return product_id if product_id > 0 else None
+
+
+def _fallback_catalog_query(text: str) -> str:
+    """Keep an exact article lookup deterministic when the LLM plan is rejected."""
+    return _catalog_identifier(text) or text
+
+
 def _run_llm(history: list[dict[str, Any]], attachments: dict[str, Any]) -> dict[str, Any]:
     enriched_history: list[dict[str, Any]] = []
     for message in history:
@@ -286,11 +410,14 @@ def _process(
             response["cart_proposal"] = proposal
         return response
     if reference is not None:
-        return {
-            "content": "Понял ссылку на выбранный товар из предыдущего сообщения.",
-            "resolved_reference": {"product_id": reference["id"]},
-            "products": [reference],
-        }
+        detail = _catalog_detail(reference.get("id"))
+        if detail is not None:
+            response = _detail_answer(detail)
+            response["resolved_reference"] = {"product_id": detail["id"]}
+            return response
+        response = _missing_detail_answer()
+        response["resolved_reference"] = {"product_id": reference["id"]}
+        return response
     if llm_is_configured():
         try:
             return _run_llm(dialog.get("history", []), dialog.get("attachments", {}))
@@ -304,7 +431,17 @@ def _process(
                 error_code=exc.code,
                 retryable=exc.retryable,
             )
-    content, products = _search_answer(text)
+    # A bare numeric ID is an explicit selection, so skip the search snapshot
+    # and read the authoritative detail endpoint directly.
+    product_id = _numeric_product_id(text)
+    if product_id is not None:
+        detail = _catalog_detail(product_id)
+        response = _detail_answer(detail) if detail is not None else _missing_detail_answer()
+        if llm_is_configured():
+            response["degraded"] = True
+            response["degradation_reason"] = "llm_unavailable"
+        return response
+    content, products = _search_answer(_fallback_catalog_query(text))
     response = {"content": sanitize_text(content), "products": products}
     if llm_is_configured():
         response["degraded"] = True

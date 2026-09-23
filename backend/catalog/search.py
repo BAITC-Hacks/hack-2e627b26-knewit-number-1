@@ -8,6 +8,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from django.conf import settings
+
 from config.observability import set_cache_hit
 
 
@@ -62,6 +64,9 @@ def _load_items(index_path: Path) -> tuple[dict[str, Any], ...]:
             payload = json.loads(index_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise SearchIndexError("catalog index cannot be read") from exc
+        index_source = payload.get("data_source") if isinstance(payload, dict) else None
+        if settings.CATALOG_PROVIDER == "ekt" and index_source == "fixture":
+            raise SearchIndexError("live catalog index has not been synchronized")
         items = payload.get("items") if isinstance(payload, dict) else None
         if not isinstance(items, list):
             raise SearchIndexError("catalog index has an invalid items array")
