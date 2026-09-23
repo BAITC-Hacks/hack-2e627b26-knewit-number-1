@@ -134,11 +134,41 @@ same server-side idempotency key and return the stored result without adding a
 duplicate. Strict text confirmations are limited to `да`, `подтверждаю`, and
 `добавить в корзину` when the dialog has exactly one active proposal.
 
+If the requested quantity exceeds the current additional sellable stock, the
+proposal endpoint returns `409 insufficient_stock`. The requested action is
+stored as expired and, when at least one valid sales increment remains, the
+response includes a separately confirmable replacement:
+
+```json
+{
+  "error": {"code": "insufficient_stock", "message": "..."},
+  "action_id": "<expired-source-id>",
+  "status": "expired",
+  "maximum_quantity": 3,
+  "cart": {},
+  "replacement_action": {
+    "action_id": "<new-id>",
+    "status": "proposed",
+    "quantity": 3
+  }
+}
+```
+
+Confirm only `replacement_action.action_id`; the source action remains expired.
+When no positive quantity satisfies stock and sales rules, `maximum_quantity`
+is `0` and `replacement_action` is omitted. Retrying the original request
+returns the same source and replacement action IDs without another catalog read.
+
 The fixture adapter atomically checks price, availability, and cart version.
 When any value changes it expires the old action and returns a replacement
 proposal. With `CATALOG_PROVIDER=ekt`, cart proposals and mutations fail closed
 until ekt.kz provides a conditional cart API contract; the existing catalog
 read routes remain available.
+
+Cart, action, and live product currency must match at mutation time. An empty
+cart can be rebound to a newly configured currency (which increments its
+version); a non-empty cart rejects mixed-currency proposals with
+`409 cart_currency_mismatch`.
 
 Fixture sales rules are bound into every action: pieces only, minimum/step/
 multiple of 1, and a configurable `CART_MAX_QUANTITY` (10,000 by default).
