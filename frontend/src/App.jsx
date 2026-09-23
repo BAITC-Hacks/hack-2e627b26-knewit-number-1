@@ -1756,7 +1756,13 @@ function CatalogProductCard({ product }) {
   const stock = availability?.sellable_quantity ?? product?.quantity;
 
   return (
-    <a className="catalog-product-card" href={`#product/${id}`}>
+    <a
+      className="catalog-product-card"
+      href={`#product/${id}`}
+      onClick={() => {
+        try { sessionStorage.setItem(`ekt-product-${id}`, JSON.stringify(product)); } catch { /* storage is optional */ }
+      }}
+    >
       <div className="catalog-product-image">
         {image ? <img alt={name} src={image} /> : <span>EKT</span>}
       </div>
@@ -1841,6 +1847,7 @@ function ProductDetailPage({ productId }) {
   const [product, setProduct] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [isStale, setIsStale] = useState(false);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1854,6 +1861,8 @@ function ProductDetailPage({ productId }) {
           throw sourceError;
         }
         setProduct(payload);
+        setIsStale(false);
+        try { sessionStorage.setItem(`ekt-product-${productId}`, JSON.stringify(payload)); } catch { /* storage is optional */ }
       })
       .catch((requestError) => {
         if (requestError.name === "AbortError") return;
@@ -1865,6 +1874,14 @@ function ProductDetailPage({ productId }) {
           setError("Этот товар не загружен: источник не является API EKT.kz.");
           return;
         }
+        try {
+          const cachedProduct = JSON.parse(sessionStorage.getItem(`ekt-product-${productId}`) || "null");
+          if (cachedProduct && typeof cachedProduct === "object") {
+            setProduct(cachedProduct);
+            setIsStale(true);
+            return;
+          }
+        } catch { /* ignore invalid cache */ }
         if (requestError instanceof CartApiError) {
           setError(`Не удалось загрузить информацию о товаре: ${requestError.code} (${requestError.status || "network"}).`);
           return;
@@ -1886,6 +1903,7 @@ function ProductDetailPage({ productId }) {
       {error && <div className="catalog-error">{error}</div>}
       {!loading && !error && product && (
         <>
+          {isStale && <div className="catalog-warning">Показаны сохранённые данные. Актуальная карточка временно недоступна.</div>}
           <p className="eyebrow">Карточка товара EKT.kz</p>
           <h1>{normalized.name || "Без названия"}</h1>
           <div className="product-detail-layout">

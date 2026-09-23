@@ -18,7 +18,29 @@ function getCookie(name) {
   return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : "";
 }
 
+const RETRYABLE_GET_STATUSES = new Set([408, 425, 429, 500, 502, 503, 504]);
+
 async function requestJson(path, options = {}) {
+  const isGet = !options.method || options.method.toUpperCase() === "GET";
+  const maxAttempts = isGet ? 3 : 1;
+  let lastError;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+    if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 180 * (2 ** (attempt - 1))));
+
+    try {
+      return await requestJsonOnce(path, options);
+    } catch (error) {
+      lastError = error;
+      const retryable = error?.code === "network_error" || RETRYABLE_GET_STATUSES.has(error?.status);
+      if (!retryable || attempt === maxAttempts - 1) throw error;
+    }
+  }
+
+  throw lastError;
+}
+
+async function requestJsonOnce(path, options = {}) {
   let response;
   try {
     response = await fetch(path, {
