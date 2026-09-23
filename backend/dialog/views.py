@@ -12,6 +12,7 @@ from cart.errors import CartApiError
 from cart.service import action_snapshot, create_action, owner_key_for_session
 from catalog.search import SearchIndexError, search_catalog, semantic_search_catalog
 from catalog.safety import sanitize_catalog_payload, sanitize_text
+from knowledge_base.engine import answer_query
 
 
 MAX_HISTORY = 50
@@ -90,6 +91,9 @@ def _resolve_reference(dialog: dict[str, Any], text: str) -> dict[str, Any] | No
 
 
 def _search_answer(text: str) -> tuple[str, list[dict[str, Any]]]:
+    knowledge_answer = answer_query(text)
+    if knowledge_answer["status"] != "not_found":
+        return sanitize_text(knowledge_answer["answer"]), []
     try:
         result = search_catalog(text, settings.CATALOG_INDEX_PATH, settings.CATALOG_SEARCH_MAX_RESULTS)
     except ValueError:

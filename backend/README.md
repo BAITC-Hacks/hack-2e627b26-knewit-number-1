@@ -23,6 +23,7 @@ Routes:
 - `GET /api/search/semantic?q=автоматический выключатель 16А`
 - `GET /api/cart`
 - `GET /api/analogs?id=900001`
+- `GET /api/knowledge-base?q=оплата`
 - `GET /api/session`
 - `GET /api/dialog`
 - `POST /api/dialog/messages`
@@ -117,6 +118,17 @@ catalog results. A cart proposal may be returned, but the cart is not mutated
 until the existing explicit confirmation endpoint is called. `POST
 /api/dialog/cancel` marks the current operation cancelled; `DELETE
 /api/dialog/history` starts a fresh dialog without touching other session data.
+
+## Knowledge base
+
+`GET /api/knowledge-base?q=...&lang=ru` searches the current knowledge
+entries. Only current published `approved` and
+`approved_with_qualification` entries can produce a direct answer. `missing`
+and `conflicted` entries return a safe qualification and
+`manager_required=true`; conflicting source versions are returned for audit,
+but the engine never selects one condition. The starter migration contains 11
+entries verified on 2026-09-23, including both conflicting minimum-order
+versions (15,000 and 30,000 KZT).
 
 ## BFF gateway
 

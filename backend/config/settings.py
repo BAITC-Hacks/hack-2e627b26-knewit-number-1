@@ -29,6 +29,7 @@ INSTALLED_APPS = [
     "cart",
     "dialog",
     "gateway",
+    "knowledge_base",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
