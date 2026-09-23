@@ -23,6 +23,11 @@ Routes:
 - `GET /api/search/semantic?q=автоматический выключатель 16А`
 - `GET /api/cart`
 - `GET /api/analogs?id=900001`
+- `GET /api/dialog`
+- `POST /api/dialog/messages`
+- `POST /api/dialog/messages/{message_id}/retry`
+- `POST /api/dialog/cancel`
+- `DELETE /api/dialog/history`
 - `POST /api/cart/actions`
 - `POST /api/cart/actions/{action_id}/confirm`
 - `POST /api/cart/actions/confirm-text`
@@ -99,6 +104,18 @@ material differences), `sellable_quantity` and a recommendation label.
 and desired parameters, returns at most five candidates and explains matched or
 unconfirmed parameters. Without detail enrichment, semantic results can only
 use the list fields that are present in the index.
+
+## Dialog orchestration
+
+The dialog API stores only the current conversation context in the Django
+session. `GET /api/dialog` creates a new dialog with a welcome message and
+allowed-query examples. `POST /api/dialog/messages` accepts `{ "text": "..." }`
+and returns a final `done` or `error` state after processing. References such
+as “этот товар”, “второй вариант” and “добавь два” are resolved from the latest
+catalog results. A cart proposal may be returned, but the cart is not mutated
+until the existing explicit confirmation endpoint is called. `POST
+/api/dialog/cancel` marks the current operation cancelled; `DELETE
+/api/dialog/history` starts a fresh dialog without touching other session data.
 
 ## Fixture data
 

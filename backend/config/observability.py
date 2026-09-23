@@ -107,6 +107,8 @@ def record_event(event: str, **fields: Any) -> None:
 
 
 def _intent(path: str) -> str:
+    if "/dialog" in path:
+        return "dialog"
     if "/search/semantic" in path:
         return "semantic_search"
     if "/search" in path:
