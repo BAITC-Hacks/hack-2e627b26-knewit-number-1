@@ -603,6 +603,7 @@ def compose_message(
     products_by_id: dict[int, dict[str, Any]] = {}
     product_sources: dict[int, str] = {}
     analog_explanations: dict[int, str] = {}
+    analog_comparisons: dict[int, dict[str, Any]] = {}
     analog_policies: list[dict[str, Any]] = []
     knowledge: list[dict[str, Any]] = []
     sources: list[dict[str, Any]] = []
@@ -639,6 +640,18 @@ def compose_message(
                     products_by_id[product["id"]] = product
                     product_sources[product["id"]] = "catalog_detail_api"
                     analog_explanations[product["id"]] = sanitize_text(analog.get("explanation", ""))
+                    source_product = data.get("source_product")
+                    comparison = analog.get("comparison")
+                    if isinstance(source_product, dict) and isinstance(comparison, dict):
+                        analog_comparisons[product["id"]] = sanitize_catalog_payload(
+                            {
+                                "source_product": source_product,
+                                "analog": product,
+                                "why_fits": analog.get("explanation", ""),
+                                "matching_parameters": comparison.get("matched", []),
+                                "differences": comparison.get("differences", []),
+                            }
+                        )
                     sources.append({"type": "catalog_detail", "url": analog.get("source_ref")})
         elif item.name == "query_knowledge_base":
             knowledge.append(data)
@@ -739,6 +752,14 @@ def compose_message(
         "recommendation_reason": recommendation_reason,
         "clarifying_questions": questions,
         "products": selected_products[:5],
+        "analog_comparison": next(
+            (
+                analog_comparisons[product["id"]]
+                for product in selected_products
+                if product.get("id") in analog_comparisons
+            ),
+            None,
+        ),
         "sources": unique_sources[:10],
         "source_status": source_status,
         "manager_required": manager_required,

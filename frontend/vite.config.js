@@ -13,6 +13,12 @@ export default defineConfig(({ mode }) => {
         "/demo": { target },
       },
     },
+    preview: {
+      proxy: {
+        "/api": { target },
+        "/demo": { target },
+      },
+    },
     test: {
       environment: "jsdom",
       setupFiles: "./src/test/setup.js",

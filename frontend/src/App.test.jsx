@@ -44,7 +44,7 @@ function jsonResponse(payload, status = 200) {
   }));
 }
 
-function installFetch(handler = () => jsonResponse({})) {
+function installFetch(handler = () => jsonResponse({}), dialogHandler) {
   vi.stubGlobal("fetch", vi.fn((url, options = {}) => {
     if (url === "/api/cart" && (!options.method || options.method === "GET")) {
       return jsonResponse({ version: 0, currency: "KZT", items: [], total: "0.00", url: "/demo/cart/" });
@@ -55,6 +55,8 @@ function installFetch(handler = () => jsonResponse({})) {
     if (String(url).startsWith("/api/products/detail")) return jsonResponse(PRODUCT);
     if (url === "/api/dialog/messages") {
       const request = JSON.parse(options.body || "{}");
+      const dialogPayload = dialogHandler?.(request);
+      if (dialogPayload) return jsonResponse(dialogPayload);
       return jsonResponse({
         dialog_id: "dialog-test",
         state: "done",
@@ -69,6 +71,21 @@ function installFetch(handler = () => jsonResponse({})) {
     }
     return handler(url, options);
   }));
+}
+
+function dialogProposalResponse(proposal) {
+  return {
+    dialog_id: "dialog-test",
+    state: "done",
+    message: {
+      id: "assistant-proposal-from-api",
+      role: "assistant",
+      state: "done",
+      content: "Подготовил предложение добавить 2 шт. выбранного товара. Подтвердите добавление явно.",
+      products: [PRODUCT],
+      cart_proposal: proposal,
+    },
+  };
 }
 
 async function openProductCard(user) {
@@ -125,6 +142,86 @@ describe("cart confirmation flow", () => {
     expect(fetch).toHaveBeenCalledWith(
       "/api/cart/actions/action-original/confirm",
       expect.objectContaining({ method: "POST", body: "{}" }),
+    );
+  });
+
+  it("renders a server-issued proposal from a text command and confirms its exact action", async () => {
+    const user = userEvent.setup();
+    const proposal = action({ action_id: "dialog-action" });
+    installFetch((url) => {
+      if (url === "/api/cart/actions/dialog-action/confirm") {
+        return jsonResponse({
+          action_id: "dialog-action",
+          status: "succeeded",
+          added_quantity: 2,
+          cart: {
+            version: 1,
+            currency: "KZT",
+            total: "1834.00",
+            url: "/demo/cart/",
+            items: [{ product_id: PRODUCT.id, quantity: 2, unit_price: "917.00", product: PRODUCT }],
+          },
+        });
+      }
+      return jsonResponse({ error: { code: "unexpected" } }, 500);
+    }, (request) => request.text === "добавь два" ? dialogProposalResponse(proposal) : null);
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    const input = screen.getByLabelText("Введите сообщение");
+    await user.type(input, "добавь два");
+    await user.keyboard("{Enter}");
+
+    const summary = await screen.findByLabelText("Резюме добавления в корзину");
+    expect(summary).toHaveAttribute("data-action-id", "dialog-action");
+    expect(within(summary).getByText("2 шт.")).toBeInTheDocument();
+    expect(fetch.mock.calls.filter(([url]) => url === "/api/cart/actions")).toHaveLength(0);
+
+    await user.click(within(summary).getByRole("button", { name: "Подтвердить и добавить" }));
+
+    expect(await screen.findByText("Добавлено: 2 шт.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Открыть корзину, товаров: 2/ })).toHaveAttribute("href", "/demo/cart/");
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/cart/actions/dialog-action/confirm",
+      expect.objectContaining({ method: "POST", body: "{}" }),
+    );
+  });
+
+  it("confirms a server-issued proposal when the user explicitly replies yes", async () => {
+    const user = userEvent.setup();
+    const proposal = action({ action_id: "dialog-text-action" });
+    installFetch((url) => {
+      if (url === "/api/cart/actions/confirm-text") {
+        return jsonResponse({
+          action_id: "dialog-text-action",
+          status: "succeeded",
+          added_quantity: 2,
+          cart: {
+            version: 1,
+            currency: "KZT",
+            total: "1834.00",
+            url: "/demo/cart/",
+            items: [{ product_id: PRODUCT.id, quantity: 2, unit_price: "917.00", product: PRODUCT }],
+          },
+        });
+      }
+      return jsonResponse({ error: { code: "unexpected" } }, 500);
+    }, (request) => request.text === "добавь два" ? dialogProposalResponse(proposal) : null);
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    const input = screen.getByLabelText("Введите сообщение");
+    await user.type(input, "добавь два");
+    await user.keyboard("{Enter}");
+    await screen.findByLabelText("Резюме добавления в корзину");
+
+    await user.type(input, "да");
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByText("Добавлено: 2 шт.")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/cart/actions/confirm-text",
+      expect.objectContaining({ method: "POST", body: expect.stringContaining('"text":"да"') }),
     );
   });
 
@@ -385,5 +482,179 @@ describe("cart confirmation flow", () => {
 
     expect(await screen.findByText(/Сәлеметсіз бе!/i)).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "Қазақша" })).toHaveAttribute("aria-pressed", "true");
+  });
+});
+
+describe("catalog facts in chat", () => {
+  beforeEach(() => {
+    document.cookie = "csrftoken=csrf-ui-token; path=/";
+  });
+
+  it("renders verified detail facts, safe document links, and the server's analog comparison", async () => {
+    const user = userEvent.setup();
+    const detailProduct = {
+      ...PRODUCT,
+      quantity: 99,
+      availability: { status: "unavailable", sellable_quantity: 0 },
+      properties: { TORGOVAYA_MARKA: "IEK", POWER: "18W" },
+      certificates: [
+        { name: "Сертификат соответствия", url: "https://ekt.kz/docs/certificate.pdf" },
+        { name: "Небезопасный файл", url: "javascript:alert(1)" },
+      ],
+    };
+    const comparison = {
+      source_product: detailProduct,
+      analog: {
+        ...PRODUCT,
+        id: 900002,
+        name: "Светильник LED ДПО 18W IEK",
+        article: "ДЕМО-03-002",
+        price: 1200,
+        availability: { status: "available", sellable_quantity: 3, unit: "шт." },
+        data_status: "live",
+      },
+      why_fits: "Совпадают мощность и назначение.",
+      matching_parameters: [{ parameter: "power", source: "18W", candidate: "18W" }],
+      differences: [{ parameter: "ip_rating", source: "IP44", candidate: "IP65", kind: "higher_protection" }],
+    };
+    installFetch(undefined, (request) => {
+      if (request.text === "покажи детали") {
+        return {
+          dialog_id: "dialog-test",
+          state: "done",
+          message: { id: "details", role: "assistant", state: "done", content: "Детали товара.", products: [detailProduct] },
+        };
+      }
+      if (request.text === "подбери аналог") {
+        return {
+          dialog_id: "dialog-test",
+          state: "done",
+          message: { id: "analog", role: "assistant", state: "done", content: "Подобрал аналог.", analog_comparison: comparison },
+        };
+      }
+      return null;
+    });
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    const input = screen.getByLabelText("Введите сообщение");
+
+    await user.type(input, "покажи детали");
+    await user.keyboard("{Enter}");
+    const card = await screen.findByRole("article", { name: /Автоматический выключатель/ });
+    expect(within(card).getByText("Нет в наличии")).toBeInTheDocument();
+    expect(within(card).getByText("18W")).toBeInTheDocument();
+    expect(within(card).getByRole("link", { name: /Сертификат соответствия/ })).toHaveAttribute("href", "https://ekt.kz/docs/certificate.pdf");
+    expect(within(card).queryByRole("link", { name: /Небезопасный файл/ })).not.toBeInTheDocument();
+
+    await user.type(input, "подбери аналог");
+    await user.keyboard("{Enter}");
+    const analogCard = await screen.findByRole("article", { name: /Сравнение аналога/ });
+    expect(within(analogCard).getByText("Совпадают мощность и назначение.")).toBeInTheDocument();
+    expect(within(analogCard).getByText("Мощность")).toBeInTheDocument();
+    expect(within(analogCard).getByText("У аналога выше степень защиты.")).toBeInTheDocument();
+  });
+});
+
+describe("chat attachments", () => {
+  beforeEach(() => {
+    document.cookie = "csrftoken=csrf-ui-token; path=/";
+  });
+
+  it("uploads an allowed file before sending its server-issued attachment id with the message", async () => {
+    const user = userEvent.setup();
+    installFetch((url, options) => {
+      if (url === "/api/dialog/uploads") {
+        expect(options.method).toBe("POST");
+        expect(options.body).toBeInstanceOf(FormData);
+        expect(options.body.get("file").name).toBe("brief.pdf");
+        return jsonResponse({ attachment: { id: "attachment-123", name: "brief.pdf", size: 12 } }, 201);
+      }
+      return jsonResponse({ error: { code: "unexpected" } }, 500);
+    }, (request) => request.attachment_id === "attachment-123" ? {
+      dialog_id: "dialog-test",
+      state: "done",
+      message: { id: "attachment-answer", role: "assistant", state: "done", content: "Файл принят." },
+    } : null);
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    await user.upload(document.getElementById("attachment-input"), new File(["test payload"], "brief.pdf", { type: "application/pdf" }));
+
+    expect(await screen.findByText(/Файл готов/)).toBeInTheDocument();
+    await user.type(screen.getByLabelText("Введите сообщение"), "Проверьте документ");
+    await user.keyboard("{Enter}");
+
+    await waitFor(() => expect(fetch.mock.calls.some(([url]) => url === "/api/dialog/messages")).toBe(true));
+    const messageCall = fetch.mock.calls.find(([url]) => url === "/api/dialog/messages");
+    expect(JSON.parse(messageCall[1].body)).toMatchObject({ text: "Проверьте документ", attachment_id: "attachment-123" });
+    expect(await screen.findByText("Файл принят.")).toBeInTheDocument();
+    expect(screen.getByText("brief.pdf")).toBeInTheDocument();
+  });
+
+  it("rejects unsupported file types before making an upload request", async () => {
+    const user = userEvent.setup({ applyAccept: false });
+    installFetch();
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    await user.upload(document.getElementById("attachment-input"), new File(["not an allowed image"], "photo.png", { type: "image/png" }));
+
+    expect(await screen.findByText(/Поддерживаются только PDF, DOCX, XLSX и JPEG/)).toBeInTheDocument();
+    expect(fetch.mock.calls.some(([url]) => url === "/api/dialog/uploads")).toBe(false);
+  });
+
+  it("keeps the server-issued attachment id when retrying a failed message", async () => {
+    const user = userEvent.setup();
+    let messageAttempts = 0;
+    vi.stubGlobal("fetch", vi.fn((url, options = {}) => {
+      if (url === "/api/cart") return jsonResponse({ version: 0, currency: "KZT", items: [], total: "0.00", url: "/demo/cart/" });
+      if (url === "/api/dialog") return jsonResponse({ dialog_id: "dialog-test", state: "idle", history: [] });
+      if (url === "/api/dialog/uploads") return jsonResponse({ attachment: { id: "retry-attachment", name: "brief.pdf", size: 4 } }, 201);
+      if (url === "/api/dialog/messages") {
+        messageAttempts += 1;
+        return messageAttempts === 1
+          ? jsonResponse({ error: { code: "temporary_failure" } }, 503)
+          : jsonResponse({ dialog_id: "dialog-test", state: "done", message: { id: "retried", role: "assistant", content: "Файл обработан." } });
+      }
+      return jsonResponse({});
+    }));
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    await user.upload(document.getElementById("attachment-input"), new File(["file"], "brief.pdf", { type: "application/pdf" }));
+    await screen.findByText(/Файл готов/);
+    await user.type(screen.getByLabelText("Введите сообщение"), "Проверьте файл");
+    await user.keyboard("{Enter}");
+    await user.click(await screen.findByRole("button", { name: "Повторить" }));
+
+    expect(await screen.findByText("Файл обработан.")).toBeInTheDocument();
+    const messageBodies = fetch.mock.calls
+      .filter(([url]) => url === "/api/dialog/messages")
+      .map(([, options]) => JSON.parse(options.body));
+    expect(messageBodies).toEqual([
+      expect.objectContaining({ attachment_id: "retry-attachment" }),
+      expect.objectContaining({ attachment_id: "retry-attachment" }),
+    ]);
+  });
+
+  it("cancels a previous upload when the replacement file is invalid", async () => {
+    const user = userEvent.setup({ applyAccept: false });
+    let finishUpload;
+    installFetch((url) => {
+      if (url === "/api/dialog/uploads") return new Promise((resolve) => { finishUpload = resolve; });
+      return jsonResponse({});
+    });
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    await user.upload(document.getElementById("attachment-input"), new File(["file"], "original.pdf", { type: "application/pdf" }));
+    await screen.findByText(/Загружаем файл/);
+    await user.upload(document.getElementById("attachment-input"), new File(["file"], "invalid.png", { type: "image/png" }));
+    expect(await screen.findByText(/Поддерживаются только PDF, DOCX, XLSX и JPEG/)).toBeInTheDocument();
+
+    finishUpload(jsonResponse({ attachment: { id: "stale-upload", name: "original.pdf", size: 4 } }, 201));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.getByText(/Поддерживаются только PDF, DOCX, XLSX и JPEG/)).toBeInTheDocument();
+    expect(screen.queryByText("original.pdf")).not.toBeInTheDocument();
   });
 });

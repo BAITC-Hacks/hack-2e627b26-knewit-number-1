@@ -6,6 +6,7 @@ import {
   confirmCartText,
   createCartAction,
   getCart,
+  getProducts,
   getProduct,
   setChatLanguage,
 } from "./cartApi.js";
@@ -22,10 +23,19 @@ import {
 } from "./i18n.js";
 
 const MAX_MESSAGE_LENGTH = 1200;
-const DEMO_PRODUCT_ID = 900001;
+const MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024;
+const ATTACHMENT_TYPES = new Map([
+  ["application/pdf", "pdf"],
+  ["application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"],
+  ["application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"],
+  ["image/jpeg", "jpeg"],
+]);
+const ATTACHMENT_EXTENSIONS = new Set(["pdf", "docx", "xlsx", "jpg", "jpeg"]);
 const TEXT_CONFIRMATIONS = new Set([
   "да", "подтверждаю", "добавить в корзину", "иә", "растаймын", "себетке қосу", "себетке қосыңыз",
 ]);
+const SAFE_ERROR_MESSAGE =
+  "Не удалось получить ответ. Проверьте соединение и попробуйте ещё раз.";
 
 function safeErrorMessage(language = DEFAULT_LANGUAGE) {
   return getMessages(language).chat.responseError;
@@ -169,9 +179,19 @@ async function createAssistantResponse(prompt, signal, language = DEFAULT_LANGUA
   }
 
   if (normalized.includes("автомат") || normalized.includes("legrand")) {
-    const product = await getProduct(DEMO_PRODUCT_ID, { signal });
+    const results = await Promise.all([
+      getProducts(1, { signal }),
+      getProducts(2, { signal }),
+    ]);
+    const candidate = results
+      .flatMap((result) => Array.isArray(result?.items) ? result.items : [])
+      .find((item) => /авт|legrand/i.test(String(item?.name ?? "")));
+    if (!candidate?.id) {
+      return "В первых двух страницах API EKT.kz подходящий товар не найден.";
+    }
+    const product = await getProduct(candidate.id, { signal });
     return {
-      content: demo.product,
+      content: "Нашёл товар в каталоге EKT.kz. Укажите количество и проверьте резюме перед добавлением:",
       product: { ...product, verified_at: new Date().toISOString() },
     };
   }
@@ -198,7 +218,7 @@ function csrfToken() {
   return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : "";
 }
 
-async function requestAssistantAnswer(prompt, dialogId, signal, language = DEFAULT_LANGUAGE) {
+async function requestAssistantAnswer(prompt, dialogId, signal, language = DEFAULT_LANGUAGE, attachmentId = "") {
   const response = await fetch("/api/dialog/messages", {
     method: "POST",
     credentials: "same-origin",
@@ -207,7 +227,11 @@ async function requestAssistantAnswer(prompt, dialogId, signal, language = DEFAU
       "Content-Type": "application/json",
       ...(csrfToken() ? { "X-CSRFToken": csrfToken() } : {}),
     },
-    body: JSON.stringify({ text: prompt, ...(dialogId ? { dialog_id: dialogId } : {}) }),
+    body: JSON.stringify({
+      text: prompt,
+      ...(dialogId ? { dialog_id: dialogId } : {}),
+      ...(attachmentId ? { attachment_id: attachmentId } : {}),
+    }),
   });
   const payload = await response.json().catch(() => null);
   if (!response.ok) {
@@ -216,6 +240,45 @@ async function requestAssistantAnswer(prompt, dialogId, signal, language = DEFAU
     throw error;
   }
   return payload;
+}
+
+function attachmentExtension(file) {
+  return String(file?.name ?? "").toLowerCase().split(".").pop() || "";
+}
+
+function validateAttachment(file) {
+  if (!file) return "type";
+  if (!ATTACHMENT_TYPES.has(file.type) && !ATTACHMENT_EXTENSIONS.has(attachmentExtension(file))) return "type";
+  return file.size > MAX_ATTACHMENT_SIZE ? "size" : "";
+}
+
+function formatFileSize(size, language = DEFAULT_LANGUAGE) {
+  const bytes = Number(size);
+  if (!Number.isFinite(bytes) || bytes < 0) return "";
+  if (bytes < 1024 * 1024) return `${Math.max(1, Math.ceil(bytes / 1024))} KB`;
+  return `${new Intl.NumberFormat(getLocale(language), { maximumFractionDigits: 1 }).format(bytes / (1024 * 1024))} MB`;
+}
+
+async function uploadAttachment(file, dialogId, signal) {
+  const body = new FormData();
+  body.append("file", file, file.name);
+  if (dialogId) body.append("dialog_id", dialogId);
+
+  const response = await fetch("/api/dialog/uploads", {
+    method: "POST",
+    credentials: "same-origin",
+    signal,
+    headers: csrfToken() ? { "X-CSRFToken": csrfToken() } : {},
+    body,
+  });
+  const payload = await response.json().catch(() => null);
+  const attachment = payload?.attachment ?? payload;
+  if (!response.ok || !attachment?.id) {
+    const error = new Error("attachment_upload_failed");
+    error.code = payload?.error?.code;
+    throw error;
+  }
+  return attachment;
 }
 
 async function requestDialogState(signal) {
@@ -247,6 +310,7 @@ function Icon({ name, size = 18 }) {
     sparkle: <><path d="m12 3 1.2 4.8L18 9l-4.8 1.2L12 15l-1.2-4.8L6 9l4.8-1.2L12 3ZM19 15l.6 2.4L22 18l-2.4.6L19 21l-.6-2.4L16 18l2.4-.6L19 15Z" /></>,
     check: <path d="m5 12 4.2 4.2L19 6.5" />,
     alert: <><path d="M12 4 3.3 19h17.4L12 4Z" /><path d="M12 9v4M12 16h.01" /></>,
+    attachment: <><path d="m19.5 12.5-7.8 7.8a5 5 0 0 1-7.1-7.1l8.5-8.5a3.5 3.5 0 0 1 5 5L9.5 18.3a2 2 0 1 1-2.8-2.8l7.8-7.8" /></>,
   };
 
   return (
@@ -331,6 +395,62 @@ function formatDataAge(value, language = DEFAULT_LANGUAGE) {
   return copy.dataAgeDays(Math.floor(ageSeconds / 86400));
 }
 
+function safeCatalogDocumentUrl(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const url = value.trim();
+  if (url.startsWith("/") && !url.startsWith("//")) return url;
+  try {
+    const parsed = new URL(url);
+    if (
+      parsed.protocol !== "https:"
+      || !["ekt.kz", "www.ekt.kz"].includes(parsed.hostname)
+      || parsed.username
+      || parsed.password
+      || parsed.hash
+    ) return null;
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
+function productDocuments(product, language = DEFAULT_LANGUAGE) {
+  const copy = getMessages(language).product;
+  const sources = [
+    ["certificate", product?.certificate],
+    ["certificate", product?.certificates],
+    ["document", product?.documents],
+    ["instruction", product?.instructions],
+    ["document", product?.files],
+  ];
+  const labels = {
+    certificate: copy.certificate,
+    document: copy.document,
+    instruction: copy.instruction,
+  };
+  const documents = [];
+
+  for (const [kind, source] of sources) {
+    const entries = Array.isArray(source) ? source : [source];
+    for (const entry of entries) {
+      const url = safeCatalogDocumentUrl(
+        typeof entry === "string" ? entry : entry?.url ?? entry?.href ?? entry?.link ?? entry?.file ?? entry?.source_url,
+      );
+      if (!url || documents.some((document) => document.url === url)) continue;
+      const label = typeof entry === "object" && entry
+        ? entry.title ?? entry.name ?? entry.label ?? labels[kind]
+        : labels[kind];
+      documents.push({ label: displayProductValue(label, language), url });
+    }
+  }
+  return documents;
+}
+
+function analogParameterLabel(value, language = DEFAULT_LANGUAGE) {
+  const parameter = String(value ?? "").trim();
+  return getMessages(language).analog.parameters[parameter] ?? displayProductValue(parameter, language);
+}
+
 const PRODUCT_PROPERTY_FIELDS = [
   ["SERIES", "SERIA", "SERIIA"],
   ["KOLICHESTVO_POLYUSOV"],
@@ -339,6 +459,12 @@ const PRODUCT_PROPERTY_FIELDS = [
   ["NOMINALNOE_NAPRYAZHENIE"],
   ["TORGOVAYA_MARKA", "BRAND"],
 ];
+const PRODUCT_PROPERTY_IGNORED = new Set(["CATEGORY", "ANALOG_GROUP", "SEARCH_ALIASES", "FIXTURE_NOTE"]);
+
+function productPropertyLabel(key, language = DEFAULT_LANGUAGE) {
+  const labels = getMessages(language).product.propertyLabels;
+  return labels[key] ?? String(key).replace(/_/g, " ");
+}
 
 function getProductCharacteristics(product, language = DEFAULT_LANGUAGE) {
   const labels = getMessages(language).product.characteristics;
@@ -350,11 +476,18 @@ function getProductCharacteristics(product, language = DEFAULT_LANGUAGE) {
   }
 
   const properties = product?.properties && typeof product.properties === "object" ? product.properties : {};
-  const mapped = PRODUCT_PROPERTY_FIELDS.map((keys, index) => {
+  const usedKeys = new Set();
+  const mapped = PRODUCT_PROPERTY_FIELDS.flatMap((keys, index) => {
     const key = keys.find((candidate) => properties[candidate] !== undefined);
-    return [labels[index], key ? properties[key] : undefined];
+    if (!key || properties[key] === null || properties[key] === "") return [];
+    usedKeys.add(key);
+    return [[labels[index], properties[key]]];
   });
-  if (mapped.some(([, value]) => value !== undefined && value !== null && value !== "")) return mapped;
+  const extras = Object.entries(properties)
+    .filter(([key, value]) => !usedKeys.has(key) && !PRODUCT_PROPERTY_IGNORED.has(key) && value !== null && value !== "")
+    .slice(0, 8)
+    .map(([key, value]) => [productPropertyLabel(key, language), value]);
+  if (mapped.length > 0 || extras.length > 0) return [...mapped, ...extras];
   return [[getMessages(language).product.characteristicsTitle, getMessages(language).analog.infoMissing]];
 }
 
@@ -369,15 +502,22 @@ function ProductCard({ cartStatus, language, messageId, onCreateProposal, produc
     .some((value) => String(value ?? "").toLowerCase() === "cached" || String(value ?? "").toLowerCase() === "cache");
   const verifiedAt = product?.verified_at ?? product?.verifiedAt;
   const characteristics = getProductCharacteristics(product, language);
+  const documents = productDocuments(product, language);
   const sellableQuantity = toFiniteNumber(product?.availability?.sellable_quantity);
-  const quantity = sellableQuantity ?? toFiniteNumber(product?.quantity);
+  const rawQuantity = toFiniteNumber(product?.quantity);
+  const quantity = sellableQuantity ?? rawQuantity;
   const quantityKnown = quantity !== null;
   const isSellable = product?.availability?.status === "available" && sellableQuantity > 0;
-  const availability = product?.availability?.status === "availability_unknown"
-    ? productCopy.availabilityUnknown
-    : quantityKnown
-      ? quantity > 0 ? productCopy.available(quantity) : productCopy.unavailable
-      : productCopy.availabilityMissing;
+  const availabilityStatus = product?.availability?.status;
+  const availability = availabilityStatus === "available"
+    ? sellableQuantity !== null ? productCopy.available(sellableQuantity, product?.availability?.unit) : productCopy.availabilityUnknown
+    : availabilityStatus === "unavailable"
+      ? productCopy.unavailable
+      : availabilityStatus === "availability_unknown" || availabilityStatus === "stale"
+        ? productCopy.availabilityUnknown
+        : quantityKnown
+          ? quantity > 0 ? productCopy.available(quantity) : productCopy.unavailable
+          : productCopy.availabilityMissing;
   const isProposing = proposalState === "proposing";
   const numericQuantity = Number(selectedQuantity);
   const quantityIsValid = Number.isInteger(numericQuantity) && numericQuantity > 0;
@@ -423,6 +563,20 @@ function ProductCard({ cartStatus, language, messageId, onCreateProposal, produc
             </div>
           ))}
         </dl>
+        {documents.length > 0 && (
+          <section className="product-card-documents" aria-label={productCopy.documents}>
+            <h4>{productCopy.documents}</h4>
+            <ul>
+              {documents.map((document) => (
+                <li key={document.url}>
+                  <a href={document.url} rel="noopener noreferrer" target="_blank">
+                    {document.label} <span aria-hidden="true">↗</span>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
         {(product?.fit_reason || product?.important_difference) && (
           <div className="product-card-notes">
             {product.fit_reason && <p><strong>{productCopy.fit}</strong> {product.fit_reason}</p>}
@@ -544,12 +698,12 @@ function AnalogComparisonCard({ comparison, language }) {
         {matches.length > 0 ? (
           <ul className="analog-match-list">
             {matches.map((item, index) => {
-              const label = Array.isArray(item) ? item[0] : item?.label;
-              const value = Array.isArray(item) ? item[1] : item?.value;
+              const label = Array.isArray(item) ? item[0] : item?.label ?? item?.parameter;
+              const value = Array.isArray(item) ? item[1] : item?.value ?? item?.candidate;
               return (
                 <li key={`${label ?? "match"}-${index}`}>
                   <Icon name="check" size={13} />
-                  <span>{displayProductValue(label, language)}</span>
+                  <span>{analogParameterLabel(label, language)}</span>
                   <strong>{displayProductValue(value, language)}</strong>
                 </li>
               );
@@ -565,13 +719,13 @@ function AnalogComparisonCard({ comparison, language }) {
         {differences.length > 0 ? (
           <div className="analog-difference-list">
             {differences.map((difference, index) => (
-              <div className="analog-difference" key={`${difference?.label ?? "difference"}-${index}`}>
-                <strong>{displayProductValue(difference?.label, language)}</strong>
+              <div className="analog-difference" key={`${difference?.label ?? difference?.parameter ?? "difference"}-${index}`}>
+                <strong>{analogParameterLabel(difference?.label ?? difference?.parameter, language)}</strong>
                 <dl>
                   <div><dt>{copy.original}</dt><dd>{displayProductValue(difference?.source, language)}</dd></div>
-                  <div><dt>{copy.analog}</dt><dd>{displayProductValue(difference?.analog, language)}</dd></div>
+                  <div><dt>{copy.analog}</dt><dd>{displayProductValue(difference?.analog ?? difference?.candidate, language)}</dd></div>
                 </dl>
-                <p>{displayProductValue(difference?.note, language)}</p>
+                <p>{displayProductValue(difference?.note ?? copy.differenceKinds[difference?.kind], language)}</p>
               </div>
             ))}
           </div>
@@ -696,6 +850,13 @@ function MessageBubble({
         {paragraphs.map((paragraph, index) => (
           <p key={`${message.id}-paragraph-${index}`}>{paragraph}</p>
         ))}
+        {message.attachment && (
+          <div className="message-attachment" aria-label={`${copy.attachmentReady}: ${message.attachment.name || message.attachment.file?.name}`}>
+            <Icon name="attachment" size={14} />
+            <span>{message.attachment.name || message.attachment.file?.name}</span>
+            <small>{formatFileSize(message.attachment.size ?? message.attachment.file?.size, language)}</small>
+          </div>
+        )}
         {message.product && (
           <ProductCard
             cartStatus={cartStatus}
@@ -818,10 +979,13 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
   const copy = getMessages(language);
   const [messages, setMessages] = useState(() => [createWelcomeMessage(language)]);
   const [inputValue, setInputValue] = useState("");
+  const [attachment, setAttachment] = useState(null);
   const [phase, setPhase] = useState("idle");
   const [cartRequest, setCartRequest] = useState(null);
   const [isClearDialogOpen, setIsClearDialogOpen] = useState(false);
   const inputRef = useRef(null);
+  const attachmentInputRef = useRef(null);
+  const attachmentUploadRef = useRef(null);
   const launcherRef = useRef(null);
   const clearButtonRef = useRef(null);
   const bodyRef = useRef(null);
@@ -896,6 +1060,7 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
   useEffect(() => () => {
     pendingRef.current?.controller.abort();
     if (pendingRef.current?.statusTimer) window.clearTimeout(pendingRef.current.statusTimer);
+    attachmentUploadRef.current?.abort();
   }, []);
 
   const updateCartFromPayload = useCallback((payload) => {
@@ -1224,11 +1389,13 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
     ]);
   }, [copy.chat.stopped, language]);
 
-  const sendPrompt = useCallback((rawPrompt, { isRetry = false, errorId = "" } = {}) => {
+  const sendPrompt = useCallback((rawPrompt, { attachment: selectedAttachment = null, isRetry = false, errorId = "" } = {}) => {
     const prompt = String(rawPrompt).trim().slice(0, MAX_MESSAGE_LENGTH);
-    if (!prompt || pendingRef.current || cartLockRef.current) return;
+    if ((!prompt && !selectedAttachment) || pendingRef.current || cartLockRef.current) return;
+    const messageText = prompt || copy.chat.attachmentPrompt;
 
     setInputValue("");
+    setAttachment(null);
     setMessages((current) => {
       const withoutError = isRetry ? current.filter((message) => message.id !== errorId) : current;
       return [
@@ -1236,13 +1403,14 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
         {
           id: createId("user"),
           role: "user",
-          content: prompt,
-        time: getTimeLabel(language),
+          content: messageText,
+          attachment: selectedAttachment,
+          time: getTimeLabel(language),
         },
       ];
     });
 
-    if (TEXT_CONFIRMATIONS.has(normalizeConfirmation(prompt, language))) {
+    if (!selectedAttachment && TEXT_CONFIRMATIONS.has(normalizeConfirmation(prompt, language))) {
       void confirmByText(prompt);
       return;
     }
@@ -1251,7 +1419,7 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
     const statusTimer = window.setTimeout(() => setPhase("processing"), 280);
     pendingRef.current = { controller, statusTimer };
     setPhase("submitting");
-    requestAssistantAnswer(prompt, dialogIdRef.current, controller.signal, language)
+    requestAssistantAnswer(messageText, dialogIdRef.current, controller.signal, language, selectedAttachment?.uploadId)
       .then((answer) => {
         if (controller.signal.aborted) return;
         const response = answer?.message ?? {};
@@ -1266,7 +1434,9 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
             role: "assistant",
             content: sanitizeAssistantText(response?.content, language),
             product: response?.product ?? response?.products?.[0],
-            analogComparison: response?.analogComparison,
+            analogComparison: response?.analogComparison ?? response?.analog_comparison ?? response?.analog_comparisons?.[0],
+            cartAction: response?.cart_proposal,
+            cartPhase: response?.cart_proposal ? "proposed" : undefined,
             time: getTimeLabel(language),
           },
         ]);
@@ -1284,16 +1454,21 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
             content: safeErrorMessage(language),
             error: true,
             retryPrompt: prompt,
+            retryAttachment: selectedAttachment,
             time: getTimeLabel(language),
           },
         ]);
       });
-  }, [confirmByText, language]);
+  }, [confirmByText, copy.chat.attachmentPrompt, language]);
 
   const clearHistory = useCallback(() => {
     if (pendingRef.current) cancelGeneration();
     setMessages([createWelcomeMessage(language)]);
     setInputValue("");
+    attachmentUploadRef.current?.abort();
+    attachmentUploadRef.current = null;
+    setAttachment(null);
+    if (attachmentInputRef.current) attachmentInputRef.current.value = "";
     setPhase("idle");
     setCartRequest(null);
     cartLockRef.current = false;
@@ -1311,8 +1486,55 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
 
   const handleSubmit = (event) => {
     event.preventDefault();
-    sendPrompt(inputValue);
+    if (attachment?.status === "ready") {
+      sendPrompt(inputValue, { attachment });
+    } else {
+      sendPrompt(inputValue);
+    }
   };
+
+  const clearAttachment = useCallback(() => {
+    attachmentUploadRef.current?.abort();
+    attachmentUploadRef.current = null;
+    setAttachment(null);
+    if (attachmentInputRef.current) attachmentInputRef.current.value = "";
+    requestAnimationFrame(() => inputRef.current?.focus());
+  }, []);
+
+  const selectAttachment = useCallback((event) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+
+    attachmentUploadRef.current?.abort();
+    attachmentUploadRef.current = null;
+    const validationError = validateAttachment(file);
+    if (validationError) {
+      setAttachment({ file, status: "error", error: validationError });
+      return;
+    }
+
+    const controller = new AbortController();
+    attachmentUploadRef.current = controller;
+    setAttachment({ file, status: "uploading" });
+    uploadAttachment(file, dialogIdRef.current, controller.signal)
+      .then((uploaded) => {
+        if (attachmentUploadRef.current !== controller) return;
+        attachmentUploadRef.current = null;
+        setAttachment({
+          file,
+          status: "ready",
+          uploadId: uploaded.id,
+          name: uploaded.name || file.name,
+          size: uploaded.size ?? file.size,
+        });
+      })
+      .catch((error) => {
+        if (error?.name === "AbortError" || attachmentUploadRef.current !== controller) return;
+        attachmentUploadRef.current = null;
+        setAttachment({ file, status: "error", error: "upload" });
+      });
+  }, []);
 
   const statusLabel = cartRequest
     ? copy.chat.status.cart
@@ -1404,7 +1626,8 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
                 onCreateProposal={createProposal}
                 onRetry={(prompt, errorId) => {
                   setPhase("idle");
-                  sendPrompt(prompt, { errorId, isRetry: true });
+                  const failedMessage = messages.find((message) => message.id === errorId);
+                  sendPrompt(prompt, { attachment: failedMessage?.retryAttachment, errorId, isRetry: true });
                 }}
                 onSuggestion={sendPrompt}
               />
@@ -1417,10 +1640,62 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
               <Icon name="sparkle" size={13} />
               {copy.chat.catalogBasis}
             </p>
+            {attachment && (
+              <div
+                aria-live="polite"
+                className={`attachment-status attachment-status--${attachment.status}`}
+                role={attachment.status === "error" ? "alert" : "status"}
+              >
+                <Icon name="attachment" size={15} />
+                <span className="attachment-status-copy">
+                  <strong>{attachment.name || attachment.file?.name}</strong>
+                  <small>
+                    {attachment.status === "uploading"
+                      ? copy.chat.attachmentUploading
+                      : attachment.status === "ready"
+                        ? `${copy.chat.attachmentReady} · ${formatFileSize(attachment.size ?? attachment.file?.size, language)}`
+                        : attachment.error === "size"
+                          ? copy.chat.attachmentSizeError
+                          : attachment.error === "type"
+                            ? copy.chat.attachmentTypeError
+                            : copy.chat.attachmentUploadError}
+                  </small>
+                </span>
+                <button
+                  aria-label={copy.chat.attachmentRemove}
+                  className="attachment-remove"
+                  onClick={clearAttachment}
+                  type="button"
+                >
+                  <Icon name="close" size={14} />
+                </button>
+              </div>
+            )}
             <form className="chat-composer" onSubmit={handleSubmit}>
               <label className="sr-only" htmlFor="message-input">{copy.chat.inputLabel}</label>
+              <input
+                accept=".pdf,.docx,.xlsx,.jpg,.jpeg,application/pdf,application/vnd.openxmlformats-officedocument.wordprocessingml.document,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,image/jpeg"
+                aria-hidden="true"
+                className="sr-only"
+                disabled={Boolean(pendingRef.current) || Boolean(cartRequest)}
+                id="attachment-input"
+                onChange={selectAttachment}
+                ref={attachmentInputRef}
+                tabIndex={-1}
+                type="file"
+              />
+              <button
+                aria-label={copy.chat.attachmentAdd}
+                className="attachment-button"
+                disabled={Boolean(pendingRef.current) || Boolean(cartRequest)}
+                onClick={() => attachmentInputRef.current?.click()}
+                title={copy.chat.attachmentAdd}
+                type="button"
+              >
+                <Icon name="attachment" size={17} />
+              </button>
               <textarea
-                aria-describedby="composer-disclaimer"
+                aria-describedby="composer-disclaimer attachment-help"
                 autoComplete="off"
                 disabled={Boolean(pendingRef.current) || Boolean(cartRequest)}
                 id="message-input"
@@ -1429,7 +1704,11 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
                 onKeyDown={(event) => {
                   if (event.key === "Enter" && !event.shiftKey) {
                     event.preventDefault();
-                    sendPrompt(inputValue);
+                    if (attachment?.status === "ready") {
+                      sendPrompt(inputValue, { attachment });
+                    } else {
+                      sendPrompt(inputValue);
+                    }
                   }
                 }}
                 placeholder={copy.chat.placeholder}
@@ -1442,7 +1721,7 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
                 <button
                   aria-label={copy.chat.send}
                   className="send-button"
-                  disabled={Boolean(pendingRef.current) || Boolean(cartRequest) || !inputValue.trim()}
+                  disabled={Boolean(pendingRef.current) || Boolean(cartRequest) || attachment?.status === "uploading" || (!inputValue.trim() && attachment?.status !== "ready")}
                   type="submit"
                 >
                   <Icon name="arrow" size={17} />
@@ -1452,6 +1731,7 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
             <p className="composer-disclaimer" id="composer-disclaimer">
               {copy.chat.disclaimer}
             </p>
+            <p className="attachment-help" id="attachment-help">{copy.chat.attachmentHelp}</p>
           </div>
         </aside>
       )}
@@ -1463,9 +1743,185 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
   );
 }
 
+function catalogProductValue(product, key) {
+  return product?.[key] ?? product?.normalized?.[key];
+}
+
+function CatalogProductCard({ product }) {
+  const id = catalogProductValue(product, "id");
+  const name = catalogProductValue(product, "name") || "Без названия";
+  const article = catalogProductValue(product, "article");
+  const image = product?.image || product?.image_url || product?.normalized?.image_url;
+  const price = typeof product?.price === "object" ? product.price?.amount : product?.price;
+  const availability = product?.availability || product?.normalized?.availability;
+  const stock = availability?.sellable_quantity ?? product?.quantity;
+
+  return (
+    <a className="catalog-product-card" href={`#product/${id}`}>
+      <div className="catalog-product-image">
+        {image ? <img alt={name} src={image} /> : <span>EKT</span>}
+      </div>
+      <div className="catalog-product-info">
+        <h3>{name}</h3>
+        {article && <p className="catalog-article">Артикул: {article}</p>}
+        <div className="catalog-product-footer">
+          <strong>{price != null ? `${price} ₸` : "Цена уточняется"}</strong>
+          <span className={stock > 0 ? "catalog-stock catalog-stock--available" : "catalog-stock"}>
+            {stock > 0 ? `В наличии: ${stock}` : "Наличие уточняется"}
+          </span>
+        </div>
+      </div>
+    </a>
+  );
+}
+
+function CatalogPage() {
+  const [items, setItems] = useState([]);
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadCatalog = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      // The case scope includes the first two API pages.
+      const results = await Promise.all([getProducts(1), getProducts(2)]);
+      if (results.some((result) => result?.data_source !== "ekt")) {
+        throw new Error("catalog_source_not_ekt");
+      }
+      const uniqueItems = new Map();
+      results.forEach((result) => {
+        (Array.isArray(result?.items) ? result.items : []).forEach((item) => {
+          if (item?.id !== undefined && !uniqueItems.has(item.id)) uniqueItems.set(item.id, item);
+        });
+      });
+      setItems([...uniqueItems.values()]);
+    } catch {
+      setError("Не удалось загрузить каталог. Проверьте соединение с API EKT.kz.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadCatalog(); }, [loadCatalog]);
+
+  const filteredItems = items.filter((item) => {
+    const haystack = [item?.name, item?.article, item?.id].join(" ").toLowerCase();
+    return haystack.includes(query.trim().toLowerCase());
+  });
+
+  return (
+    <main className="catalog-page">
+      <div className="catalog-page-header">
+        <div>
+          <a className="catalog-back" href="#top">← На главную</a>
+          <p className="eyebrow">Каталог EKT.kz</p>
+          <h1>Электротехническая продукция</h1>
+          <p>Актуальные товары из каталога партнёра. Откройте карточку, чтобы посмотреть характеристики и наличие.</p>
+        </div>
+        <input
+          aria-label="Поиск по каталогу"
+          className="catalog-search"
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Поиск по названию или артикулу"
+          value={query}
+        />
+      </div>
+      {error && <div className="catalog-error">{error}</div>}
+      {loading && items.length === 0 && <div className="catalog-loading">Загружаем товары из API EKT.kz…</div>}
+      {!loading && !error && filteredItems.length === 0 && <div className="catalog-loading">Товары не найдены.</div>}
+      <div className="catalog-product-grid">
+        {filteredItems.map((product) => <CatalogProductCard key={product.id} product={product} />)}
+      </div>
+    </main>
+  );
+}
+
+function ProductDetailPage({ productId }) {
+  const [product, setProduct] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
+    getProduct(productId, { signal: controller.signal })
+      .then((payload) => {
+        if (payload?.data_source !== "ekt") {
+          const sourceError = new Error("catalog_source_not_ekt");
+          sourceError.code = "catalog_source_not_ekt";
+          throw sourceError;
+        }
+        setProduct(payload);
+      })
+      .catch((requestError) => {
+        if (requestError.name === "AbortError") return;
+        if (requestError?.payload?.data_source && requestError.payload.data_source !== "ekt") {
+          setError("Этот товар не загружен: источник не является API EKT.kz.");
+          return;
+        }
+        if (requestError?.code === "catalog_source_not_ekt") {
+          setError("Этот товар не загружен: источник не является API EKT.kz.");
+          return;
+        }
+        if (requestError instanceof CartApiError) {
+          setError(`Не удалось загрузить информацию о товаре: ${requestError.code} (${requestError.status || "network"}).`);
+          return;
+        }
+        setError("Не удалось загрузить информацию о товаре: network_error.");
+      })
+      .finally(() => setLoading(false));
+    return () => controller.abort();
+  }, [productId]);
+
+  const normalized = product?.normalized || product;
+  const properties = normalized?.properties_raw || product?.properties || {};
+  const image = product?.image || normalized?.image_url;
+
+  return (
+    <main className="product-detail-page">
+      <a className="catalog-back" href="#catalog">← Вернуться в каталог</a>
+      {loading && <div className="catalog-loading">Загружаем информацию о товаре…</div>}
+      {error && <div className="catalog-error">{error}</div>}
+      {!loading && !error && product && (
+        <>
+          <p className="eyebrow">Карточка товара EKT.kz</p>
+          <h1>{normalized.name || "Без названия"}</h1>
+          <div className="product-detail-layout">
+            <div className="product-detail-image">{image ? <img alt={normalized.name} src={image} /> : <span>EKT</span>}</div>
+            <section className="product-detail-summary">
+              <p className="catalog-article">Артикул: {normalized.article || "не указан"}</p>
+              <strong className="product-detail-price">
+                {normalized.price?.amount ?? product.price ?? "Цена уточняется"} {normalized.price?.currency || "₸"}
+              </strong>
+              <p>{normalized.description || product.description || "Описание отсутствует в источнике."}</p>
+              <div className="product-detail-stock">
+                {normalized.availability?.sellable_quantity ?? product.quantity ?? "—"} шт. доступно для продажи
+              </div>
+            </section>
+          </div>
+          <section className="product-properties">
+            <h2>Характеристики</h2>
+            {Object.keys(properties).length ? Object.entries(properties).map(([key, value]) => (
+              <div className="product-property" key={key}><span>{key}</span><strong>{Array.isArray(value) ? value.join(", ") : String(value)}</strong></div>
+            )) : <p>Характеристики отсутствуют в источнике.</p>}
+          </section>
+        </>
+      )}
+    </main>
+  );
+}
+
 function SitePreview({ cart, language, onLanguageRequest, onOpenChat }) {
   const copy = getMessages(language).site;
-  const categories = copy.categories.map(([title, description], index) => [title, description, ["#d9f3e9", "#e3edff", "#fff0cc", "#f1e5ff"][index]]);
+  const categories = [
+    ["Кабель / провод", "Кабель, провод и аксессуары", "#d9f3e9"],
+    ["Светильники", "LED, лампы и управление светом", "#e3edff"],
+    ["Низковольтная аппаратура", "Автоматика и защита сетей", "#fff0cc"],
+    ["Монтаж и инструмент", "Всё для надёжного монтажа", "#f1e5ff"],
+  ];
   const cartCount = Array.isArray(cart?.items)
     ? cart.items.reduce((total, item) => total + (toFiniteNumber(item?.quantity) ?? 0), 0)
     : 0;
@@ -1547,8 +2003,15 @@ export default function App() {
   const [language, setLanguage] = useState(DEFAULT_LANGUAGE);
   const [languageChangeRequest, setLanguageChangeRequest] = useState(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [route, setRoute] = useState(window.location.hash);
   const [cart, setCart] = useState({ items: [], total: "0.00", url: "/demo/cart/" });
   const [cartStatus, setCartStatus] = useState("loading");
+
+  useEffect(() => {
+    const onHashChange = () => setRoute(window.location.hash);
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
 
   const refreshCart = useCallback(async () => {
     setCartStatus("loading");
@@ -1583,12 +2046,18 @@ export default function App() {
 
   return (
     <>
-      <SitePreview
-        cart={cart}
-        language={language}
-        onLanguageRequest={setLanguageChangeRequest}
-        onOpenChat={() => setIsChatOpen(true)}
-      />
+      {route === "#catalog" ? (
+        <CatalogPage />
+      ) : route.startsWith("#product/") ? (
+        <ProductDetailPage productId={route.slice("#product/".length)} />
+      ) : (
+        <SitePreview
+          cart={cart}
+          language={language}
+          onLanguageRequest={setLanguageChangeRequest}
+          onOpenChat={() => setIsChatOpen(true)}
+        />
+      )}
       {showCookie && <CookieBanner language={language} onClose={() => setShowCookie(false)} />}
       <ChatWidget
         cartStatus={cartStatus}
