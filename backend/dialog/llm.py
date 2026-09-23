@@ -41,6 +41,19 @@ Security and truth rules:
 - Do not add to cart, place an order, or initiate payment. Cart confirmation is handled by a separate
   deterministic server workflow.
 
+Catalog lookup rules:
+- A standalone numeric or alphanumeric code supplied by the user is a product identifier, article,
+  series, or model. Treat a trailing underscore or dash as part of the supplied code for lookup, but
+  do not require the user to type it again.
+- For every newly supplied identifier, call search_catalog first with that identifier alone and
+  mode=exact_fuzzy. Never ask the user to repeat or confirm an identifier before searching for it.
+- If an identifier has no exact match, say that it was not found and continue with the other stated
+  characteristics; ask only for a genuinely missing characteristic, not for the same identifier.
+- Preserve constraints already provided earlier in the conversation. An answer such as "модульный"
+  or "400В" supplements the existing request; do not ask again for a type, series, poles, current,
+  voltage, or brand that is already known. Once brand, product type, current, poles, and voltage are
+  known, search for candidates instead of asking a generic follow-up question.
+
 Return only the requested structured planning object. The server renders all catalog and knowledge
 facts itself; your recommendation and recommendation_reason are inference, not source facts.
 """.strip()
@@ -84,6 +97,19 @@ SAFE_REFUSAL_RU = (
     "Уточните артикул или характеристику — либо передайте вопрос менеджеру."
 )
 PROCESSING_TOKEN_RU = "Проверяю актуальные данные…"
+
+# Identifiers may contain Latin or Cyrillic prefixes, digits, underscores and
+# dashes. This recognises common EKT articles such as ``027008`` and
+# ``200300272_`` as well as short series such as ``A123`` without mistaking a
+# unit-bearing value such as ``400В`` for an article.
+_CATALOG_IDENTIFIER_RE = re.compile(
+    r"(?<![0-9A-Za-zА-Яа-яЁё_])(?=[0-9A-Za-zА-Яа-яЁё_-]*\d)"
+    r"[0-9A-Za-zА-Яа-яЁё_][0-9A-Za-zА-Яа-яЁё_-]{3,}(?![0-9A-Za-zА-Яа-яЁё_])"
+)
+_UNIT_VALUE_RE = re.compile(
+    r"\d+(?:[.,]\d+)?(?:а|a|в|v|ка|кa|квт|kw|вт|w|ма|мм|м|гц|hz)$",
+    re.IGNORECASE,
+)
 
 
 class LLMError(RuntimeError):
@@ -349,6 +375,110 @@ def _history_input(history: Iterable[dict[str, Any]], max_chars: int) -> list[di
     return selected
 
 
+def _catalog_identifiers(value: str) -> list[str]:
+    """Extract likely article/model tokens without treating units as SKUs."""
+    identifiers: list[str] = []
+    for match in _CATALOG_IDENTIFIER_RE.finditer(value):
+        identifier = match.group(0)
+        if _UNIT_VALUE_RE.fullmatch(identifier):
+            continue
+        # A numeric-first identifier needs enough digits to distinguish it from
+        # values such as 3P or 400В. Letter-prefixed short series (A123) remain
+        # valid identifiers.
+        if identifier[0].isdigit() and sum(char.isdigit() for char in identifier) < 4:
+            continue
+        if identifier not in identifiers:
+            identifiers.append(identifier)
+    return identifiers
+
+
+def _catalog_identifier(value: str) -> str | None:
+    """Return the first identifier for deterministic non-LLM fallback lookup."""
+    identifiers = _catalog_identifiers(value)
+    return identifiers[0] if identifiers else None
+
+
+def _latest_user_catalog_identifier(history: Iterable[dict[str, Any]]) -> str | None:
+    """Return the article/model from the latest user turn, if present.
+
+    This is kept server-side so the model cannot decide to skip a lookup and
+    start a clarification loop after the customer has already supplied a code.
+    """
+    for message in reversed(list(history)):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        return _catalog_identifier(content) if isinstance(content, str) else None
+    return None
+
+
+def _latest_user_catalog_identifiers(history: Iterable[dict[str, Any]]) -> list[str]:
+    """Return every article/model supplied in the latest user turn."""
+    for message in reversed(list(history)):
+        if message.get("role") != "user":
+            continue
+        content = message.get("content")
+        return _catalog_identifiers(content) if isinstance(content, str) else []
+    return []
+
+
+def _latest_user_message_has_catalog_identifier(history: Iterable[dict[str, Any]]) -> bool:
+    """Compatibility predicate for article/model lookup detection."""
+    return _latest_user_catalog_identifier(history) is not None
+
+
+def _clarification_repeats_known_constraint(
+    plan: dict[str, Any], history: Iterable[dict[str, Any]]
+) -> bool:
+    """Reject only questions that ask again for a parameter already supplied."""
+    if plan["response_kind"] != "clarification":
+        return False
+    user_text = " ".join(
+        message["content"].casefold()
+        for message in history
+        if message.get("role") == "user" and isinstance(message.get("content"), str)
+    )
+    questions = " ".join(plan["clarifying_questions"]).casefold()
+    raw_user_text = " ".join(
+        message["content"]
+        for message in history
+        if message.get("role") == "user" and isinstance(message.get("content"), str)
+    )
+    known_identifier = bool(_catalog_identifiers(raw_user_text))
+    generic_capitalized_words = {
+        "нужен", "нужна", "нужно", "автомат", "кабель", "товар", "вариант",
+        "модульный", "силовой", "для", "с", "на", "любой",
+    }
+    known_brand = bool(
+        re.search(r"\b(?:бренд|марка|производител[ья])\s*[:\-]?\s*[A-Za-zА-Яа-яЁё]", raw_user_text, re.IGNORECASE)
+        or any(
+            word.casefold() not in generic_capitalized_words
+            for word in re.findall(r"\b(?:[A-Z]{2,}|[A-ZА-ЯЁ][a-zа-яё]+)\b", raw_user_text)
+        )
+    )
+    known_and_repeated = (
+        (known_identifier and bool(re.search(r"артикул|код|повтор|сер(?:ия|ии)", questions))),
+        (
+            bool(re.search(r"\bмодульн", user_text))
+            and bool(re.search(r"\bтип|модульн|силов|назначени", questions))
+        ),
+        (
+            bool(re.search(r"\b\d+\s*(?:п|p|полюс)", user_text))
+            and "полюс" in questions
+        ),
+        (
+            bool(re.search(r"\b\d+(?:[.,]\d+)?\s*(?:а|a)\b", user_text))
+            and bool(re.search(r"ток|ампер", questions))
+        ),
+        (
+            bool(re.search(r"\b\d+(?:[.,]\d+)?\s*(?:в|v)\b", user_text))
+            and bool(re.search(r"напряжени|вольт", questions))
+        ),
+        (known_brand and bool(re.search(r"производител|бренд|марка", questions))),
+    )
+    return any(known_and_repeated)
+
+
 class OpenAIResponsesOrchestrator:
     def __init__(
         self,
@@ -421,8 +551,10 @@ class OpenAIResponsesOrchestrator:
         self._sleep = sleep
         self._random_value = random_value
 
-    def _payload(self, input_items: list[dict[str, Any]]) -> dict[str, Any]:
-        return {
+    def _payload(
+        self, input_items: list[dict[str, Any]], *, require_catalog_lookup: bool = False
+    ) -> dict[str, Any]:
+        payload = {
             "model": self._model,
             "instructions": SYSTEM_INSTRUCTIONS,
             "input": input_items,
@@ -440,6 +572,9 @@ class OpenAIResponsesOrchestrator:
             },
             "store": False,
         }
+        if require_catalog_lookup:
+            payload["tool_choice"] = {"type": "function", "name": "search_catalog"}
+        return payload
 
     def _request(self, payload: dict[str, Any], deadline: float) -> dict[str, Any]:
         for attempt in range(self._max_retries + 1):
@@ -503,12 +638,24 @@ class OpenAIResponsesOrchestrator:
         if not conversation:
             raise LLMProtocolError("dialog history contains no usable message")
         trace: list[ToolTrace] = []
+        required_catalog_identifiers = _latest_user_catalog_identifiers(conversation)
+        # An identifier lookup may be emitted one call per model response. Give
+        # every supplied identifier a round before applying the normal bound.
+        # The model still cannot make more than ``_max_calls_per_round`` calls
+        # in any one response.
+        tool_round_limit = max(self._max_tool_rounds, len(required_catalog_identifiers))
 
-        for tool_round in range(self._max_tool_rounds + 1):
-            response = self._request(self._payload(conversation), deadline)
+        for tool_round in range(tool_round_limit + 1):
+            response = self._request(
+                self._payload(
+                    conversation,
+                    require_catalog_lookup=bool(required_catalog_identifiers),
+                ),
+                deadline,
+            )
             calls = _function_calls(response)
             if calls:
-                if tool_round >= self._max_tool_rounds:
+                if tool_round >= tool_round_limit:
                     raise LLMProtocolError("model exceeded the tool-round bound")
                 if len(calls) > self._max_calls_per_round:
                     raise LLMProtocolError("model exceeded the per-round tool-call bound")
@@ -532,6 +679,17 @@ class OpenAIResponsesOrchestrator:
                         arguments = json.loads(raw_arguments)
                     except json.JSONDecodeError as exc:
                         raise LLMProtocolError("model returned invalid tool arguments") from exc
+                    if required_catalog_identifiers:
+                        if (
+                            name != "search_catalog"
+                            or not isinstance(arguments, dict)
+                            or arguments.get("query") not in required_catalog_identifiers
+                            or arguments.get("mode") != "exact_fuzzy"
+                        ):
+                            raise LLMProtocolError(
+                                "model did not search the supplied catalog identifier exactly"
+                            )
+                        required_catalog_identifiers.remove(arguments["query"])
                     try:
                         result = self._registry.execute(name, arguments)
                     except (ToolValidationError, ToolExecutionError) as exc:
@@ -571,6 +729,9 @@ class OpenAIResponsesOrchestrator:
                     )
                 continue
 
+            if required_catalog_identifiers:
+                raise LLMProtocolError("model skipped the required catalog identifier lookup")
+
             text = _response_text(response)
             if not text:
                 raise LLMProtocolError("model returned neither tools nor structured output")
@@ -579,6 +740,8 @@ class OpenAIResponsesOrchestrator:
             except json.JSONDecodeError as exc:
                 raise LLMProtocolError("model returned invalid structured output") from exc
             plan = _validate_plan(raw_plan)
+            if _clarification_repeats_known_constraint(plan, conversation):
+                raise LLMProtocolError("model repeated a known catalog constraint")
             message = compose_message(plan, trace, model=self._model)
             duration_ms = (self._clock() - started) * 1000
             observe_latency("llm_orchestration", duration_ms)

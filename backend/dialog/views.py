@@ -20,6 +20,7 @@ from dialog.llm import (
     LLMError,
     OpenAIResponsesOrchestrator,
     PROCESSING_TOKEN_RU,
+    _catalog_identifier,
     llm_is_configured,
 )
 from dialog.payment_safety import (
@@ -169,6 +170,11 @@ def _search_answer(text: str) -> tuple[str, list[dict[str, Any]]]:
     return f"Нашёл {len(products)} вариант(а). Уточните, какой товар использовать дальше.", products
 
 
+def _fallback_catalog_query(text: str) -> str:
+    """Keep an exact article lookup deterministic when the LLM plan is rejected."""
+    return _catalog_identifier(text) or text
+
+
 def _run_llm(history: list[dict[str, Any]], attachments: dict[str, Any]) -> dict[str, Any]:
     enriched_history: list[dict[str, Any]] = []
     for message in history:
@@ -267,7 +273,7 @@ def _process(
                 error_code=exc.code,
                 retryable=exc.retryable,
             )
-    content, products = _search_answer(text)
+    content, products = _search_answer(_fallback_catalog_query(text))
     response = {"content": sanitize_text(content), "products": products}
     if llm_is_configured():
         response["degraded"] = True
