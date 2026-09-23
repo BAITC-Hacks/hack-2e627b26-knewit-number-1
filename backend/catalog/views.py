@@ -10,6 +10,7 @@ from django.views.decorators.http import require_GET
 
 from catalog.errors import CatalogError
 from catalog.providers import get_catalog_provider
+from catalog.search import SearchIndexError, search_catalog
 from catalog.providers.fixture import (
     FIXTURE_DATASET_VERSION,
     FIXTURE_PRODUCT_COUNT,
@@ -68,6 +69,18 @@ def product_detail(request: HttpRequest) -> JsonResponse:
         return JsonResponse(provider.get_product(product_id, _fixture_case(request)))
     except CatalogError as exc:
         return _error_response(exc, getattr(provider, "data_source", "unknown"))
+
+
+@require_GET
+def search(request: HttpRequest) -> JsonResponse:
+    query = request.GET.get("q", "")
+    try:
+        result = search_catalog(query, settings.CATALOG_INDEX_PATH, settings.CATALOG_SEARCH_MAX_RESULTS)
+    except ValueError as exc:
+        return JsonResponse({"error": {"code": "invalid_query", "message": str(exc)}}, status=400)
+    except SearchIndexError as exc:
+        return JsonResponse({"error": {"code": "search_index_unavailable", "message": str(exc)}}, status=503)
+    return JsonResponse(result)
 
 
 @require_GET

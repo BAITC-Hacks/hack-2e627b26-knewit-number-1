@@ -11,6 +11,7 @@ from catalog.errors import CatalogConfigurationError, CatalogError, CatalogTrans
 from catalog.index_sync import sync_catalog
 from catalog.providers.ekt import EktCatalogProvider
 from catalog.providers.fixture import FIXTURE_DATASET_VERSION, FIXTURE_SEED, FixtureCatalogProvider
+from catalog.search import clear_index_cache, search_catalog
 
 
 @contextmanager
@@ -413,3 +414,53 @@ class CatalogIndexSyncTests(SimpleTestCase):
             self.assertFalse(initial.success)
             self.assertEqual(initial.stop_reason, "max_pages_guard")
             self.assertFalse(index_path.exists())
+
+
+class CatalogSearchTests(SimpleTestCase):
+    def setUp(self):
+        clear_index_cache()
+
+    def tearDown(self):
+        clear_index_cache()
+
+    def write_index(self, index_path):
+        index_path.write_text(
+            json.dumps(
+                {
+                    "data_source": "fixture",
+                    "items": [
+                        {"id": 101, "article": "АВТ-001", "name": "Автоматический выключатель 16A"},
+                        {"id": 102, "article": "КАБ-002", "name": "Кабель силовой ВВГ"},
+                        {"id": 103, "article": "ЛАМ-003", "name": "Лампа светодиодная"},
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    def test_exact_id_and_article_have_top_one_priority(self):
+        with sync_test_paths() as (index_path, _):
+            self.write_index(index_path)
+            by_id = search_catalog("101", index_path)
+            by_article = search_catalog("авт-001", index_path)
+
+        self.assertEqual(by_id["mode"], "exact")
+        self.assertEqual([item["id"] for item in by_id["results"]], [101])
+        self.assertEqual(by_article["mode"], "exact")
+        self.assertEqual([item["id"] for item in by_article["results"]], [101])
+
+    def test_fuzzy_name_returns_at_most_five_candidates(self):
+        with sync_test_paths() as (index_path, _):
+            self.write_index(index_path)
+            result = search_catalog("автоматический выключатл", index_path)
+
+        self.assertEqual(result["mode"], "fuzzy")
+        self.assertLessEqual(len(result["results"]), 5)
+        self.assertEqual(result["results"][0]["id"], 101)
+        self.assertIn(result["results"][0]["match_type"], {"partial", "fuzzy"})
+
+    def test_search_endpoint_returns_bad_request_without_query(self):
+        response = self.client.get("/api/search")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_query")

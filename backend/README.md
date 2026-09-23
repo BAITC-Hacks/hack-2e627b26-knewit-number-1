@@ -19,6 +19,7 @@ Routes:
 
 - `GET /api/products?page=1&per_page=20`
 - `GET /api/products/detail?id=900001`
+- `GET /api/search?q=автоматический выключатл`
 - `GET /api/cart`
 - `POST /api/cart/actions`
 - `POST /api/cart/actions/{action_id}/confirm`
@@ -57,6 +58,15 @@ Scheduler, cron, or a container scheduler once per day. Example cron entry:
 ```cron
 0 3 * * * cd /path/to/project/backend && /path/to/venv/bin/python manage.py sync_catalog
 ```
+
+## Local catalog search
+
+`GET /api/search?q=...` reads the persisted local index and keeps it cached in
+memory until the index file changes. Numeric IDs and exact articles are returned
+as one `exact` top-1 result. Other queries use case-insensitive partial/fuzzy
+matching against product names and return no more than five `fuzzy` candidates.
+If the index has not been synchronized yet, the endpoint returns HTTP 503 with
+`search_index_unavailable`.
 
 ## Fixture data
 
