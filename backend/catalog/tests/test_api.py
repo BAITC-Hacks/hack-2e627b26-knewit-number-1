@@ -3,7 +3,7 @@ from unittest.mock import Mock, patch
 from django.test import SimpleTestCase, override_settings
 
 from catalog.availability import calculate_availability
-from catalog.errors import CatalogConfigurationError, CatalogTransportError
+from catalog.errors import CatalogConfigurationError, CatalogError, CatalogTransportError
 from catalog.providers.ekt import EktCatalogProvider
 from catalog.providers.fixture import FIXTURE_DATASET_VERSION, FIXTURE_SEED
 
@@ -219,6 +219,66 @@ class EktProviderTests(SimpleTestCase):
             result = provider.get_product(515291)
         self.assertEqual(result["url_api_detail"], "/api/products/detail?id=515291")
         self.assertEqual(result["data_source"], "ekt")
+
+    @patch(
+        "catalog.providers.ekt.socket.getaddrinfo",
+        side_effect=[
+            [(None, None, None, None, ("8.8.8.8", 443))],
+            [(None, None, None, None, ("8.8.8.8", 443))],
+            [(None, None, None, None, ("10.0.0.1", 443))],
+        ],
+    )
+    def test_external_urls_are_restricted_to_https_allowlisted_public_hosts(self, mocked_getaddrinfo):
+        provider = self.make_provider()
+        payload = {
+            "id": 515291,
+            "image": "https://ekt.kz/upload/image.jpg",
+            "properties": {
+                "CERTIFICATE": "https://ekt.kz/docs/certificate.pdf",
+                "EVIL": "https://evil.example/file.pdf",
+                "PRIVATE": "https://ekt.kz/private/file.pdf",
+            },
+        }
+
+        result = provider._mark_source(payload)
+
+        self.assertEqual(result["image"], "https://ekt.kz/upload/image.jpg")
+        self.assertEqual(result["properties"]["CERTIFICATE"], "https://ekt.kz/docs/certificate.pdf")
+        self.assertIsNone(result["properties"]["EVIL"])
+        self.assertIsNone(result["properties"]["PRIVATE"])
+        self.assertTrue(mocked_getaddrinfo.called)
+
+    def test_missing_items_are_tolerated_and_unknown_properties_are_preserved(self):
+        provider = self.make_provider()
+        payload = {"page": 1, "items": None, "unknown_field": {"value": 7}}
+
+        result = provider._mark_source(payload)
+
+        self.assertIsNone(result["items"])
+        self.assertEqual(result["unknown_field"], {"value": 7})
+        self.assertEqual(result["data_source"], "ekt")
+
+    def test_authorization_errors_are_not_retried(self):
+        provider = self.make_provider()
+        failure = CatalogError(401, "upstream_unauthorized", "unauthorized")
+        with patch.object(EktCatalogProvider, "_request_once", side_effect=failure) as request:
+            with self.assertRaises(CatalogError):
+                provider._request("products", {"page": 1})
+        request.assert_called_once()
+
+    @patch("catalog.providers.ekt.time.sleep")
+    @patch("catalog.providers.ekt.random.uniform", return_value=0.05)
+    def test_retry_uses_exponential_backoff_with_jitter(self, mocked_jitter, mocked_sleep):
+        provider = self.make_provider()
+        failure = CatalogError(503, "ekt_api_error", "upstream")
+        success = {"page": 1, "items": []}
+        with patch.object(EktCatalogProvider, "_request_once", side_effect=[failure, failure, success]) as request:
+            self.assertEqual(provider._request("products", {"page": 1}), success)
+        self.assertEqual(request.call_count, 3)
+        delays = [call.args[0] for call in mocked_sleep.call_args_list]
+        self.assertAlmostEqual(delays[0], 0.15)
+        self.assertAlmostEqual(delays[1], 0.25)
+        self.assertEqual(mocked_jitter.call_count, 2)
 
 
 class ProviderSwitchTests(SimpleTestCase):

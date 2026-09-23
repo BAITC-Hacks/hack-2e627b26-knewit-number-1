@@ -39,8 +39,15 @@ EKT_API_USERNAME = os.environ.get("EKT_API_USERNAME", "")
 EKT_API_PASSWORD = os.environ.get("EKT_API_PASSWORD", "")
 EKT_CONNECT_TIMEOUT_SECONDS = float(os.environ.get("EKT_CONNECT_TIMEOUT_SECONDS", "1"))
 EKT_READ_TIMEOUT_SECONDS = float(os.environ.get("EKT_READ_TIMEOUT_SECONDS", "3"))
+EKT_DEADLINE_SECONDS = float(os.environ.get("EKT_DEADLINE_SECONDS", "5"))
 EKT_MAX_RETRIES = int(os.environ.get("EKT_MAX_RETRIES", "2"))
+EKT_RETRY_JITTER_SECONDS = float(os.environ.get("EKT_RETRY_JITTER_SECONDS", "0.1"))
 EKT_MAX_RESPONSE_BYTES = int(os.environ.get("EKT_MAX_RESPONSE_BYTES", "5000000"))
+EKT_ASSET_ALLOWED_HOSTS = tuple(
+    host.strip().casefold()
+    for host in os.environ.get("EKT_ASSET_ALLOWED_HOSTS", "ekt.kz").split(",")
+    if host.strip()
+)
 
 SELLABLE_STORE_IDS = tuple(
     int(value.strip())

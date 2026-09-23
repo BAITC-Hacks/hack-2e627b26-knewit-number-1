@@ -2,6 +2,9 @@
 
 Backend proxy for the EKT product API with a deterministic demo-fixture provider.
 
+The verified upstream contract and unresolved integration questions are recorded
+in [docs/ekt-api-contract.md](docs/ekt-api-contract.md).
+
 ## Run locally
 
 ```bash
