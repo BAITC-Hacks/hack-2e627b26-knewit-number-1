@@ -315,4 +315,45 @@ describe("cart confirmation flow", () => {
     await waitFor(() => expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument());
     await waitFor(() => expect(clearButton).toHaveFocus());
   });
+
+  it("switches the interface to kk-KZ and safely expires an active cart proposal", async () => {
+    const user = userEvent.setup();
+    installFetch((url) => {
+      if (url === "/api/cart/actions") return jsonResponse(action(), 201);
+      if (url === "/api/chat/language") {
+        return jsonResponse({
+          language: "kk",
+          language_changed: true,
+          cart_summary: {
+            message: "Себеттің белсенді ұсынысы тоқтатылды. Қазақ тілінде жаңа қорытынды жасаңыз.",
+            requires_new_proposal: true,
+          },
+        });
+      }
+      return jsonResponse({}, 500);
+    });
+
+    const card = await openProductCard(user);
+    await user.click(within(card).getByRole("button", { name: /добавить/i }));
+    const summary = await screen.findByLabelText("Резюме добавления в корзину");
+    await user.click(screen.getByRole("button", { name: "Қазақша" }));
+
+    expect((await screen.findAllByText(/Себеттің белсенді ұсынысы тоқтатылды/i)).length).toBeGreaterThanOrEqual(1);
+    expect(within(summary).getByRole("button")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "Қазақша" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: /Кеңесші чатын жабу/i })).toBeInTheDocument();
+    expect(fetch.mock.calls.filter(([url]) => url === "/api/chat/language").length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("uses the site-level language switch before the chat is opened", async () => {
+    const user = userEvent.setup();
+    installFetch();
+    render(<App />);
+    await waitFor(() => expect(fetch).toHaveBeenCalledWith("/api/cart", expect.anything()));
+    await user.click(screen.getByRole("button", { name: "Қазақша" }));
+    await user.click(screen.getByRole("button", { name: /Кеңесші чатын ашу/i }));
+
+    expect(await screen.findByText(/Сәлеметсіз бе!/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Қазақша" })).toHaveAttribute("aria-pressed", "true");
+  });
 });

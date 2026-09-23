@@ -6,32 +6,29 @@ import {
   createCartAction,
   getCart,
   getProduct,
+  setChatLanguage,
 } from "./cartApi.js";
+import {
+  DEFAULT_LANGUAGE,
+  LOCALES,
+  formatCurrency,
+  formatDateTime,
+  formatNumber,
+  formatTime,
+  getLocale,
+  getMessages,
+  normalizeLanguage,
+} from "./i18n.js";
 
 const MAX_MESSAGE_LENGTH = 1200;
 const DEMO_PRODUCT_ID = 900001;
-const TEXT_CONFIRMATIONS = new Set(["да", "подтверждаю", "добавить в корзину"]);
-const SAFE_ERROR_MESSAGE =
-  "Не удалось получить ответ. Проверьте соединение и попробуйте ещё раз.";
+const TEXT_CONFIRMATIONS = new Set([
+  "да", "подтверждаю", "добавить в корзину", "иә", "растаймын", "себетке қосу", "себетке қосыңыз",
+]);
 
-const SUGGESTIONS = [
-  {
-    label: "Автомат Legrand на 160 А",
-    prompt: "Нужен автомат Legrand на 160 А, 3 полюса",
-  },
-  {
-    label: "Кабель для квартиры",
-    prompt: "Подберите кабель ВВГнг для прокладки в квартире",
-  },
-  {
-    label: "Условия доставки",
-    prompt: "Есть ли доставка в Алматы и от какой суммы она бесплатная?",
-  },
-  {
-    label: "Аналог отсутствующего товара",
-    prompt: "Подберите аналог отсутствующего автомата 3P",
-  },
-];
+function safeErrorMessage(language = DEFAULT_LANGUAGE) {
+  return getMessages(language).chat.responseError;
+}
 
 const DEMO_PRODUCT = {
   id: 515291,
@@ -100,13 +97,13 @@ const DEMO_ANALOG_COMPARISON = {
   ],
 };
 
-function createWelcomeMessage() {
+function createWelcomeMessage(language = DEFAULT_LANGUAGE) {
+  const messages = getMessages(language);
   return {
     id: "welcome",
     role: "assistant",
-    content:
-      "Здравствуйте! Я помогу найти электротехнический товар, проверить наличие и подобрать подходящий вариант.\n\nЧто вы ищете?",
-    suggestions: SUGGESTIONS,
+    content: messages.welcome,
+    suggestions: messages.suggestions,
   };
 }
 
@@ -115,27 +112,25 @@ function createId(prefix) {
   return `${prefix}-${value}`;
 }
 
-function normalizeConfirmation(value) {
-  return String(value).toLocaleLowerCase("ru-RU").trim().split(/\s+/).join(" ");
+function normalizeConfirmation(value, language = DEFAULT_LANGUAGE) {
+  return String(value).toLocaleLowerCase(getLocale(language)).trim().split(/\s+/).join(" ");
 }
 
-function getTimeLabel() {
-  return new Intl.DateTimeFormat("ru-RU", {
-    hour: "2-digit",
-    minute: "2-digit",
-  }).format(new Date());
+function getTimeLabel(language = DEFAULT_LANGUAGE) {
+  return formatTime(new Date(), language);
 }
 
-function sanitizeAssistantText(value) {
+function sanitizeAssistantText(value, language = DEFAULT_LANGUAGE) {
+  const copy = getMessages(language).chat;
   const text = String(value ?? "").replace(/[<>]/g, "");
   const withoutSecrets = text
     .replace(
       /(?:api[_ -]?key|api[_ -]?password|authorization|bearer|basic\s+auth|token|secret)\s*[:=]\s*[^\s,;]+/gi,
-      "[секрет скрыт]",
+      copy.secretHidden,
     )
     .replace(
       /(?:stack trace|traceback|internal server error|at\s+[\w./-]+\([^\n]*\))/gi,
-      "[внутренняя ошибка скрыта]",
+      copy.internalErrorHidden,
     );
 
   return withoutSecrets.length > 2000
@@ -143,7 +138,8 @@ function sanitizeAssistantText(value) {
     : withoutSecrets;
 }
 
-async function createAssistantResponse(prompt, signal) {
+async function createAssistantResponse(prompt, signal, language = DEFAULT_LANGUAGE) {
+  const demo = getMessages(language).demo;
   const normalized = prompt.toLowerCase();
 
   if (normalized.includes("ошибка")) {
@@ -151,16 +147,16 @@ async function createAssistantResponse(prompt, signal) {
   }
 
   if (normalized.includes("достав")) {
-    return "Подскажу условия доставки после уточнения города и суммы заказа. Для Алматы точный порог бесплатной доставки сейчас нужно подтвердить по актуальному условию — я не буду называть неподтверждённую сумму.";
+    return demo.delivery;
   }
 
   if (normalized.includes("кабел")) {
-    return "Помогу подобрать кабель по сечению, материалу жил, напряжению и способу прокладки. Уточните длину и где он будет использоваться — так я отберу релевантные позиции из каталога.";
+    return demo.cable;
   }
 
   if (normalized.includes("аналог")) {
     return {
-      content: "Нашёл доступный аналог и сравнил критичные параметры:",
+      content: demo.analog,
       analogComparison: {
         ...DEMO_ANALOG_COMPARISON,
         analog: {
@@ -174,15 +170,15 @@ async function createAssistantResponse(prompt, signal) {
   if (normalized.includes("автомат") || normalized.includes("legrand")) {
     const product = await getProduct(DEMO_PRODUCT_ID, { signal });
     return {
-      content: "Нашёл демонстрационную позицию в каталоге. Укажите количество и проверьте резюме перед добавлением:",
+      content: demo.product,
       product: { ...product, verified_at: new Date().toISOString() },
     };
   }
 
-  return "Принял запрос. В рабочей версии я найду товар в каталоге, проверю актуальные цену и наличие, а при необходимости покажу объяснимые аналоги. Сейчас это демонстрационный каркас чата.";
+  return demo.fallback;
 }
 
-async function requestDemoAnswer(prompt, signal) {
+async function requestDemoAnswer(prompt, signal, language = DEFAULT_LANGUAGE) {
   await new Promise((resolve, reject) => {
     const timeoutId = window.setTimeout(resolve, 650);
     signal.addEventListener("abort", () => {
@@ -193,7 +189,7 @@ async function requestDemoAnswer(prompt, signal) {
     }, { once: true });
   });
 
-  return createAssistantResponse(prompt, signal);
+  return createAssistantResponse(prompt, signal, language);
 }
 
 function Icon({ name, size = 18 }) {
@@ -227,9 +223,9 @@ function Icon({ name, size = 18 }) {
   );
 }
 
-function displayProductValue(value) {
+function displayProductValue(value, language = DEFAULT_LANGUAGE) {
   if (value === null || value === undefined || String(value).trim() === "") {
-    return "Информация не найдена";
+    return getMessages(language).analog.infoMissing;
   }
   return String(value);
 }
@@ -243,87 +239,65 @@ function toFiniteNumber(value) {
   return null;
 }
 
-function formatProductPrice(value) {
+function formatProductPrice(value, language = DEFAULT_LANGUAGE) {
   const price = toFiniteNumber(value);
-  if (price === null) {
-    return "Информация не найдена";
-  }
-  return `${new Intl.NumberFormat("ru-RU").format(price)} ₸`;
+  if (price === null) return getMessages(language).product.priceMissing;
+  return formatCurrency(price, "KZT", language);
 }
 
-function formatMoney(value, currency = "KZT") {
+function formatMoney(value, currency = "KZT", language = DEFAULT_LANGUAGE) {
   const amount = toFiniteNumber(value);
-  if (amount === null) return "Информация не найдена";
+  if (amount === null) return getMessages(language).analog.infoMissing;
   try {
-    return new Intl.NumberFormat("ru-RU", {
-      style: "currency",
-      currency,
-      maximumFractionDigits: Number.isInteger(amount) ? 0 : 2,
+    return new Intl.NumberFormat(getLocale(language), {
+      style: "currency", currency, maximumFractionDigits: Number.isInteger(amount) ? 0 : 2,
     }).format(amount);
   } catch {
-    return `${new Intl.NumberFormat("ru-RU").format(amount)} ${currency}`;
+    return `${formatNumber(amount, language)} ${currency}`;
   }
 }
 
-function formatExpiry(value) {
+function formatExpiry(value, language = DEFAULT_LANGUAGE) {
+  const copy = getMessages(language).cart;
   const date = new Date(value);
-  if (!value || Number.isNaN(date.getTime())) return "в течение нескольких минут";
-  return `до ${new Intl.DateTimeFormat("ru-RU", { hour: "2-digit", minute: "2-digit" }).format(date)}`;
+  if (!value || Number.isNaN(date.getTime())) return copy.expiryFallback;
+  return copy.expiryUntil(formatDateTime(value, language, { hour: "2-digit", minute: "2-digit" }));
 }
 
-function cartErrorCopy(code, payload = {}) {
-  const messages = {
-    ambiguous_confirmation: "В диалоге несколько предложений. Нажмите кнопку в нужном резюме.",
-    no_active_action: "Активного предложения нет. Выберите количество в карточке товара.",
-    confirmation_required: "Это сообщение не подтверждает изменение корзины.",
-    product_unavailable: "Товар сейчас недоступен для добавления в корзину.",
-    cart_integration_unavailable: "Добавление в рабочую корзину пока недоступно. Демо работает только с fixture-каталогом.",
-    cart_currency_mismatch: "В корзине уже есть товары в другой валюте.",
-    quantity_limit_exceeded: `Можно выбрать не более ${payload?.maximum_quantity ?? "доступного лимита"}.`,
-    quantity_rule_violation: "Количество не соответствует правилам продажи товара.",
-    catalog_verification_failed: "Не удалось заново проверить цену и остаток. Корзина не изменена.",
-    cart_mutation_failed: "Добавление не завершено. Мы проверили актуальное состояние корзины.",
-    cart_busy: "Корзина занята другим изменением. Повторите подтверждение.",
-    action_in_progress: "Действие ещё обрабатывается. Повторите проверку через несколько секунд.",
-    action_expired: "Срок действия резюме истёк. Сформируйте новое.",
-    action_stale: "Резюме устарело, а актуального варианта сейчас нет.",
-    action_failed: "Это действие уже завершилось ошибкой. Создайте новое резюме.",
-    csrf_failed: "Защитная сессия корзины обновлена. Повторите действие.",
-    csrf_cookie_missing: "Защитная сессия корзины обновлена. Повторите действие.",
-    network_error: "Связь прервалась. Состояние корзины перепроверено; можно безопасно повторить это подтверждение.",
-  };
-  return messages[code] ?? "Не удалось изменить корзину. Попробуйте сформировать новое резюме.";
+function cartErrorCopy(code, payload = {}, language = DEFAULT_LANGUAGE) {
+  const messages = getMessages(language).errors;
+  if (code === "quantity_limit_exceeded" || code === "insufficient_stock") return messages.insufficient_stock(payload?.maximum_quantity ?? "доступного лимита");
+  return messages[code] ?? messages.generic;
 }
 
-function formatVerifiedAt(value) {
+function formatVerifiedAt(value, language = DEFAULT_LANGUAGE) {
   const date = new Date(value);
-  if (!value || Number.isNaN(date.getTime())) return "Информация не найдена";
-  return new Intl.DateTimeFormat("ru-RU", {
-    dateStyle: "medium",
-    timeStyle: "short",
-  }).format(date);
+  if (!value || Number.isNaN(date.getTime())) return getMessages(language).analog.infoMissing;
+  return formatDateTime(date, language, { dateStyle: "medium", timeStyle: "short" });
 }
 
-function formatDataAge(value) {
+function formatDataAge(value, language = DEFAULT_LANGUAGE) {
+  const copy = getMessages(language).product;
   const date = new Date(value);
-  if (!value || Number.isNaN(date.getTime())) return "Информация не найдена";
+  if (!value || Number.isNaN(date.getTime())) return getMessages(language).analog.infoMissing;
   const ageSeconds = Math.max(0, Math.floor((Date.now() - date.getTime()) / 1000));
-  if (ageSeconds < 60) return "только что";
-  if (ageSeconds < 3600) return `${Math.floor(ageSeconds / 60)} мин. назад`;
-  if (ageSeconds < 86400) return `${Math.floor(ageSeconds / 3600)} ч назад`;
-  return `${Math.floor(ageSeconds / 86400)} дн. назад`;
+  if (ageSeconds < 60) return copy.dataAgeNow;
+  if (ageSeconds < 3600) return copy.dataAgeMinutes(Math.floor(ageSeconds / 60));
+  if (ageSeconds < 86400) return copy.dataAgeHours(Math.floor(ageSeconds / 3600));
+  return copy.dataAgeDays(Math.floor(ageSeconds / 86400));
 }
 
 const PRODUCT_PROPERTY_FIELDS = [
-  ["Серия", ["SERIES", "SERIA", "SERIIA"]],
-  ["Полюса", ["KOLICHESTVO_POLYUSOV"]],
-  ["Номинальный ток", ["NOMINALNYY_TOK"]],
-  ["Отключающая способность", ["NOMINALNAYA_OTKLYUCHAYUSHCHAYA_SPOSOBNOST"]],
-  ["Напряжение", ["NOMINALNOE_NAPRYAZHENIE"]],
-  ["Бренд", ["TORGOVAYA_MARKA", "BRAND"]],
+  ["SERIES", "SERIA", "SERIIA"],
+  ["KOLICHESTVO_POLYUSOV"],
+  ["NOMINALNYY_TOK"],
+  ["NOMINALNAYA_OTKLYUCHAYUSHCHAYA_SPOSOBNOST"],
+  ["NOMINALNOE_NAPRYAZHENIE"],
+  ["TORGOVAYA_MARKA", "BRAND"],
 ];
 
-function getProductCharacteristics(product) {
+function getProductCharacteristics(product, language = DEFAULT_LANGUAGE) {
+  const labels = getMessages(language).product.characteristics;
   if (Array.isArray(product?.characteristics) && product.characteristics.length > 0) {
     return product.characteristics.map((item, index) => {
       if (Array.isArray(item)) return [item[0], item[1]];
@@ -332,81 +306,83 @@ function getProductCharacteristics(product) {
   }
 
   const properties = product?.properties && typeof product.properties === "object" ? product.properties : {};
-  const mapped = PRODUCT_PROPERTY_FIELDS.map(([label, keys]) => {
+  const mapped = PRODUCT_PROPERTY_FIELDS.map((keys, index) => {
     const key = keys.find((candidate) => properties[candidate] !== undefined);
-    return [label, key ? properties[key] : undefined];
+    return [labels[index], key ? properties[key] : undefined];
   });
   if (mapped.some(([, value]) => value !== undefined && value !== null && value !== "")) return mapped;
-  return [["Характеристики", "Информация не найдена"]];
+  return [[getMessages(language).product.characteristicsTitle, getMessages(language).analog.infoMissing]];
 }
 
-function ProductCard({ cartStatus, messageId, onCreateProposal, product, proposalState }) {
+function ProductCard({ cartStatus, language, messageId, onCreateProposal, product, proposalState }) {
+  const messages = getMessages(language);
+  const productCopy = messages.product;
   const [imageFailed, setImageFailed] = useState(false);
   const [selectedQuantity, setSelectedQuantity] = useState("1");
-  const productName = displayProductValue(product?.name);
-  const article = displayProductValue(product?.article);
+  const productName = displayProductValue(product?.name, language);
+  const article = displayProductValue(product?.article, language);
   const isCached = [product?.data_status, product?.dataStatus, product?.source, product?.status]
     .some((value) => String(value ?? "").toLowerCase() === "cached" || String(value ?? "").toLowerCase() === "cache");
   const verifiedAt = product?.verified_at ?? product?.verifiedAt;
-  const characteristics = getProductCharacteristics(product);
+  const characteristics = getProductCharacteristics(product, language);
   const sellableQuantity = toFiniteNumber(product?.availability?.sellable_quantity);
   const quantity = sellableQuantity ?? toFiniteNumber(product?.quantity);
   const quantityKnown = quantity !== null;
   const isSellable = product?.availability?.status === "available" && sellableQuantity > 0;
   const availability = product?.availability?.status === "availability_unknown"
-    ? "Доступность не подтверждена"
+    ? productCopy.availabilityUnknown
     : quantityKnown
-      ? quantity > 0 ? `Доступно: ${quantity} шт.` : "Нет в наличии"
-      : "Наличие: информация не найдена";
+      ? quantity > 0 ? productCopy.available(quantity) : productCopy.unavailable
+      : productCopy.availabilityMissing;
   const isProposing = proposalState === "proposing";
   const numericQuantity = Number(selectedQuantity);
   const quantityIsValid = Number.isInteger(numericQuantity) && numericQuantity > 0;
 
   return (
-    <article className="product-card" aria-label={`Карточка товара: ${productName}`}>
+    <article className="product-card" aria-label={`${productCopy.card}: ${productName}`}>
       <div className="product-card-media">
         {product?.image && !imageFailed ? (
           <img
-            alt={`Изображение товара: ${productName}`}
+            alt={`${productCopy.image}: ${productName}`}
             className="product-card-image"
             onError={() => setImageFailed(true)}
             src={product.image}
           />
         ) : (
-          <div className="product-card-image-missing">Изображение: информация не найдена</div>
+          <div className="product-card-image-missing">{productCopy.missingImage}</div>
         )}
       </div>
       <div className="product-card-body">
-        <div className="product-card-eyebrow">Товар из каталога EKT.kz</div>
+        <div className="product-card-eyebrow">{productCopy.eyebrow}</div>
         <h3 className="product-card-title">{productName}</h3>
-        <div className="product-card-article">Артикул: {article}</div>
+        <div className="product-card-article">{productCopy.article}: {article}</div>
         <div className="product-card-summary">
-          <strong className="product-card-price">{formatProductPrice(product?.price)}</strong>
+          <strong className="product-card-price">{formatProductPrice(product?.price, language)}</strong>
           <span className={`product-card-availability ${isSellable ? "product-card-availability--in" : ""}`}>
             {availability}
           </span>
         </div>
         <div className={`product-card-data ${isCached ? "product-card-data--cached" : "product-card-data--live"}`}>
           <span className="product-card-data-dot" />
-          <span>{isCached ? "Данные из кэша" : "Данные live"}</span>
+          <span>{isCached ? productCopy.cache : productCopy.live}</span>
           {isCached && (
             <span className="product-card-data-age">
-              verified_at: {formatVerifiedAt(verifiedAt)} · возраст: {formatDataAge(verifiedAt)}
+              {productCopy.verified}: {formatVerifiedAt(verifiedAt, language)} · {productCopy.age}: {formatDataAge(verifiedAt, language)}
             </span>
           )}
         </div>
         <dl className="product-card-characteristics">
           {characteristics.map(([label, value]) => (
             <div className="product-characteristic" key={label}>
-              <dt>{displayProductValue(label)}</dt>
-              <dd>{displayProductValue(value)}</dd>
+              <dt>{displayProductValue(label, language)}</dt>
+              <dd>{displayProductValue(value, language)}</dd>
             </div>
           ))}
         </dl>
         {(product?.fit_reason || product?.important_difference) && (
           <div className="product-card-notes">
-            {product.fit_reason && <p><strong>Почему подходит:</strong> {product.fit_reason}</p>}
-            {product.important_difference && <p><strong>Важно:</strong> {product.important_difference}</p>}
+            {product.fit_reason && <p><strong>{productCopy.fit}</strong> {product.fit_reason}</p>}
+            {product.important_difference && <p><strong>{productCopy.important}</strong> {product.important_difference}</p>}
           </div>
         )}
         <form
@@ -416,7 +392,7 @@ function ProductCard({ cartStatus, messageId, onCreateProposal, product, proposa
             if (quantityIsValid) onCreateProposal(product, messageId, numericQuantity);
           }}
         >
-          <label htmlFor={`quantity-${messageId}`}>Количество</label>
+          <label htmlFor={`quantity-${messageId}`}>{productCopy.quantity}</label>
           <div className="product-card-cart-controls">
             <input
               aria-describedby={`quantity-help-${messageId}`}
@@ -431,15 +407,15 @@ function ProductCard({ cartStatus, messageId, onCreateProposal, product, proposa
             />
             <button disabled={cartStatus === "loading" || !isSellable || !quantityIsValid || isProposing} type="submit">
               <Icon name="cart" size={15} />
-              {isProposing ? "Проверяю…" : proposalState === "failed" ? "Повторить" : "Добавить"}
+              {isProposing ? productCopy.checking : proposalState === "failed" ? productCopy.retry : productCopy.add}
             </button>
           </div>
           <span className="product-card-cart-help" id={`quantity-help-${messageId}`}>
             {cartStatus === "loading"
-              ? "Подготавливаем защищённую сессию корзины"
+              ? productCopy.preparing
               : cartStatus === "error"
-                ? "Соединение восстановится при следующей попытке"
-                : "Сначала покажем итоговое резюме"}
+                ? productCopy.reconnect
+                : productCopy.summaryHint}
           </span>
         </form>
         {product?.url ? (
@@ -449,24 +425,24 @@ function ProductCard({ cartStatus, messageId, onCreateProposal, product, proposa
             rel="noopener noreferrer"
             target="_blank"
           >
-            Открыть официальную карточку <span aria-hidden="true">↗</span>
+            {productCopy.official} <span aria-hidden="true">↗</span>
           </a>
         ) : (
-          <span className="product-card-link product-card-link--missing">Официальная карточка: информация не найдена</span>
+          <span className="product-card-link product-card-link--missing">{productCopy.officialMissing}</span>
         )}
       </div>
     </article>
   );
 }
 
-function formatAnalogMoney(amount, currency) {
+function formatAnalogMoney(amount, currency, language = DEFAULT_LANGUAGE) {
   const value = toFiniteNumber(amount);
-  if (value === null) return "Информация не найдена";
-  const currencyLabel = currency === "KZT" ? "₸" : displayProductValue(currency);
-  return `${new Intl.NumberFormat("ru-RU").format(value)} ${currencyLabel}`;
+  if (value === null) return getMessages(language).analog.infoMissing;
+  return currency === "KZT" ? formatCurrency(value, currency, language) : `${formatNumber(value, language)} ${displayProductValue(currency, language)}`;
 }
 
-function AnalogComparisonCard({ comparison }) {
+function AnalogComparisonCard({ comparison, language }) {
+  const copy = getMessages(language).analog;
   const sourceProductRaw = comparison?.source_product ?? comparison?.original_product ?? {};
   const sourceProduct = sourceProductRaw?.normalized ?? sourceProductRaw;
   const analogRaw = comparison?.analog ?? {};
@@ -483,44 +459,44 @@ function AnalogComparisonCard({ comparison }) {
   const differences = Array.isArray(comparison?.differences) ? comparison.differences : [];
 
   return (
-    <article className="analog-card" aria-label={`Сравнение аналога: ${displayProductValue(analog.name)}`}>
+    <article className="analog-card" aria-label={`${copy.comparison}: ${displayProductValue(analog.name, language)}`}>
       <div className="analog-card-topline">
-        <span className="analog-card-label">Рекомендуемый аналог</span>
+        <span className="analog-card-label">{copy.label}</span>
         {comparison?.is_demo && <span className="analog-demo-badge">DEMO fixture</span>}
       </div>
       <div className="analog-source">
-        <span>Вместо</span>
-        <strong>{displayProductValue(sourceProduct.name)}</strong>
-        <small>Артикул: {displayProductValue(sourceProduct.article)}</small>
+        <span>{copy.instead}</span>
+        <strong>{displayProductValue(sourceProduct.name, language)}</strong>
+        <small>{copy.article}: {displayProductValue(sourceProduct.article, language)}</small>
       </div>
       <div className="analog-arrow" aria-hidden="true">↓</div>
       <div className="analog-product">
-        <h3>{displayProductValue(analog.name)}</h3>
-        <span>Артикул: {displayProductValue(analog.article)}</span>
+        <h3>{displayProductValue(analog.name, language)}</h3>
+        <span>{copy.article}: {displayProductValue(analog.article, language)}</span>
         <div className="analog-commerce">
-            <strong>{formatAnalogMoney(analogPrice.amount ?? analog.price, analogPrice.currency ?? analog.currency)}</strong>
+            <strong>{formatAnalogMoney(analogPrice.amount ?? analog.price, analogPrice.currency ?? analog.currency, language)}</strong>
           <span className={isAvailable ? "analog-stock analog-stock--available" : "analog-stock"}>
             {isAvailable
-              ? `В наличии: ${sellableQuantity} ${displayProductValue(analogAvailability.unit ?? "шт.")}`
+              ? copy.inStock(sellableQuantity, displayProductValue(analogAvailability.unit ?? (normalizeLanguage(language) === "kk" ? "дана" : "шт."), language))
               : analogAvailability.status === "unavailable"
-                ? "Нет в наличии"
-                : "Наличие: информация не найдена"}
+                ? copy.unavailable
+                : copy.missing}
           </span>
         </div>
         <div className={`analog-verification ${isLive ? "analog-verification--live" : "analog-verification--cached"}`}>
           <span className="analog-verification-dot" />
-          <strong>{isLive ? "Цена и наличие проверены live" : "Цена и наличие не подтверждены live"}</strong>
-          <span>Проверено: {formatVerifiedAt(verifiedAt)}</span>
+          <strong>{isLive ? copy.live : copy.notLive}</strong>
+          <span>{copy.checked}: {formatVerifiedAt(verifiedAt, language)}</span>
         </div>
       </div>
 
-      <section className="analog-reason" aria-label="Почему подходит">
-        <span>Почему подходит</span>
-        <p>{displayProductValue(comparison?.why_fits)}</p>
+      <section className="analog-reason" aria-label={copy.why}>
+        <span>{copy.why}</span>
+        <p>{displayProductValue(comparison?.why_fits, language)}</p>
       </section>
 
-      <section className="analog-section" aria-label="Совпадающие параметры">
-        <h4>Совпадающие параметры</h4>
+      <section className="analog-section" aria-label={copy.matching}>
+        <h4>{copy.matching}</h4>
         {matches.length > 0 ? (
           <ul className="analog-match-list">
             {matches.map((item, index) => {
@@ -529,55 +505,56 @@ function AnalogComparisonCard({ comparison }) {
               return (
                 <li key={`${label ?? "match"}-${index}`}>
                   <Icon name="check" size={13} />
-                  <span>{displayProductValue(label)}</span>
-                  <strong>{displayProductValue(value)}</strong>
+                  <span>{displayProductValue(label, language)}</span>
+                  <strong>{displayProductValue(value, language)}</strong>
                 </li>
               );
             })}
           </ul>
         ) : (
-          <p className="analog-missing">Информация не найдена</p>
+          <p className="analog-missing">{copy.infoMissing}</p>
         )}
       </section>
 
-      <section className="analog-section" aria-label="Существенные отличия">
-        <h4>Существенные отличия</h4>
+      <section className="analog-section" aria-label={copy.differences}>
+        <h4>{copy.differences}</h4>
         {differences.length > 0 ? (
           <div className="analog-difference-list">
             {differences.map((difference, index) => (
               <div className="analog-difference" key={`${difference?.label ?? "difference"}-${index}`}>
-                <strong>{displayProductValue(difference?.label)}</strong>
+                <strong>{displayProductValue(difference?.label, language)}</strong>
                 <dl>
-                  <div><dt>Исходный</dt><dd>{displayProductValue(difference?.source)}</dd></div>
-                  <div><dt>Аналог</dt><dd>{displayProductValue(difference?.analog)}</dd></div>
+                  <div><dt>{copy.original}</dt><dd>{displayProductValue(difference?.source, language)}</dd></div>
+                  <div><dt>{copy.analog}</dt><dd>{displayProductValue(difference?.analog, language)}</dd></div>
                 </dl>
-                <p>{displayProductValue(difference?.note)}</p>
+                <p>{displayProductValue(difference?.note, language)}</p>
               </div>
             ))}
           </div>
         ) : (
-          <p className="analog-missing">Информация не найдена</p>
+          <p className="analog-missing">{copy.infoMissing}</p>
         )}
       </section>
     </article>
   );
 }
 
-function CartConfirmation({ action, onConfirm, phase = "proposed", result, statusNote }) {
+function CartConfirmation({ action, language, onConfirm, phase = "proposed", result, statusNote }) {
+  const copy = getMessages(language).cart;
   const product = action?.product ?? {};
   const isPending = phase === "confirming";
   const isInactive = ["expired", "failed", "succeeded"].includes(phase);
 
   if (phase === "succeeded" && result) {
     return (
-      <section className="cart-result cart-result--success" aria-label="Товар добавлен в корзину">
+      <section className="cart-result cart-result--success" aria-label={copy.result}>
         <div className="cart-result-icon"><Icon name="check" size={18} /></div>
         <div>
-          <strong>Добавлено: {result.added_quantity} шт.</strong>
-          <span>Корзина обновлена</span>
+          <strong>{copy.added(result.added_quantity)}</strong>
+          <span>{copy.updated}</span>
         </div>
         <a href={result.cart?.url || "/demo/cart/"} rel="noopener noreferrer" target="_blank">
-          Открыть корзину <span aria-hidden="true">↗</span>
+          {copy.open} <span aria-hidden="true">↗</span>
         </a>
       </section>
     );
@@ -587,23 +564,23 @@ function CartConfirmation({ action, onConfirm, phase = "proposed", result, statu
     <section
       className={`cart-confirmation cart-confirmation--${phase}`}
       data-action-id={action?.action_id}
-      aria-label="Резюме добавления в корзину"
+      aria-label={copy.summary}
     >
       <div className="cart-confirmation-head">
-        <span><Icon name="cart" size={14} /> Резюме заказа</span>
-        <span>{phase === "expired" ? "Устарело" : phase === "failed" ? "Ошибка" : "Нужно подтверждение"}</span>
+        <span><Icon name="cart" size={14} /> {copy.orderSummary}</span>
+        <span>{phase === "expired" ? copy.expired : phase === "failed" ? copy.error : copy.confirmationNeeded}</span>
       </div>
       <div className="cart-confirmation-product">
-        <strong>{displayProductValue(product.name)}</strong>
-        <span>Артикул {displayProductValue(product.article)}</span>
+        <strong>{displayProductValue(product.name, language)}</strong>
+        <span>{copy.article} {displayProductValue(product.article, language)}</span>
       </div>
       <dl className="cart-confirmation-lines">
-        <div><dt>Количество</dt><dd>{action.quantity} шт.</dd></div>
-        <div><dt>Цена за единицу</dt><dd>{formatMoney(action.unit_price, action.currency)}</dd></div>
-        <div className="cart-confirmation-total"><dt>Итого</dt><dd>{formatMoney(action.total, action.currency)}</dd></div>
+        <div><dt>{copy.quantity}</dt><dd>{action.quantity} {normalizeLanguage(language) === "kk" ? "дана" : "шт."}</dd></div>
+        <div><dt>{copy.unitPrice}</dt><dd>{formatMoney(action.unit_price, action.currency, language)}</dd></div>
+        <div className="cart-confirmation-total"><dt>{copy.total}</dt><dd>{formatMoney(action.total, action.currency, language)}</dd></div>
       </dl>
       <p className="cart-confirmation-note">
-        Цена и остаток будут проверены ещё раз. Резюме действует {formatExpiry(action.expires_at)}.
+        {copy.note(formatExpiry(action.expires_at, language))}
       </p>
       {statusNote && <p className="cart-confirmation-status" role="status">{statusNote}</p>}
       <button
@@ -612,8 +589,36 @@ function CartConfirmation({ action, onConfirm, phase = "proposed", result, statu
         onClick={() => onConfirm(action.action_id)}
         type="button"
       >
-        {isPending ? "Проверяю цену и остаток…" : isInactive ? "Подтверждение недоступно" : "Подтвердить и добавить"}
+        {isPending ? copy.checking : isInactive ? copy.unavailable : copy.confirm}
       </button>
+    </section>
+  );
+}
+
+function LanguageCartSummary({ language, summary }) {
+  const copy = getMessages(language).cart;
+  const items = Array.isArray(summary?.items) ? summary.items : [];
+  return (
+    <section className="cart-confirmation cart-confirmation--expired language-cart-summary" aria-label={`${copy.orderSummary} · ${copy.expired}`}>
+      <div className="cart-confirmation-head">
+        <span><Icon name="cart" size={14} /> {copy.orderSummary}</span>
+        <span>{copy.expired}</span>
+      </div>
+      <p className="cart-confirmation-note">{summary?.message}</p>
+      {items.length > 0 && (
+        <ul className="language-cart-summary-items">
+          {items.map((item, index) => {
+            const product = item?.product ?? {};
+            return (
+              <li key={`${product.id ?? product.article ?? "item"}-${index}`}>
+                <strong>{displayProductValue(product.name, language)}</strong>
+                <span>{copy.article}: {displayProductValue(product.article, language)} · {copy.quantity}: {item.quantity}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
+      <p className="cart-confirmation-status" role="status">{copy.newProposal}</p>
     </section>
   );
 }
@@ -621,15 +626,17 @@ function CartConfirmation({ action, onConfirm, phase = "proposed", result, statu
 function MessageBubble({
   cartStatus,
   cartRequest,
+  language,
   message,
   onConfirmAction,
   onCreateProposal,
   onRetry,
   onSuggestion,
 }) {
+  const copy = getMessages(language).chat;
   const isUser = message.role === "user";
-  const paragraphs = sanitizeAssistantText(message.content).split(/\n{2,}/);
-  const isRich = Boolean(message.product || message.cartAction);
+  const paragraphs = sanitizeAssistantText(message.content, language).split(/\n{2,}/);
+  const isRich = Boolean(message.product || message.cartAction || message.languageSummary);
 
   return (
     <div className={`message-row ${isUser ? "message-row--user" : "message-row--assistant"}`}>
@@ -639,7 +646,7 @@ function MessageBubble({
         {message.error && (
           <div className="message-kicker message-kicker--error">
             <Icon name="alert" size={14} />
-            Не удалось выполнить запрос
+            {copy.error}
           </div>
         )}
         {paragraphs.map((paragraph, index) => (
@@ -648,16 +655,19 @@ function MessageBubble({
         {message.product && (
           <ProductCard
             cartStatus={cartStatus}
+            language={language}
             messageId={message.id}
             onCreateProposal={onCreateProposal}
             product={message.product}
             proposalState={cartRequest?.kind === "proposal" && cartRequest.key === message.id ? "proposing" : message.proposalState}
           />
         )}
-        {message.analogComparison && <AnalogComparisonCard comparison={message.analogComparison} />}
+        {message.analogComparison && <AnalogComparisonCard comparison={message.analogComparison} language={language} />}
+        {message.languageSummary && <LanguageCartSummary language={language} summary={message.languageSummary} />}
         {message.cartAction && (
           <CartConfirmation
             action={message.cartAction}
+            language={language}
             onConfirm={onConfirmAction}
             phase={message.cartPhase}
             result={message.cartResult}
@@ -665,7 +675,7 @@ function MessageBubble({
           />
         )}
         {message.suggestions && (
-          <div className="suggestion-list" aria-label="Примеры запросов">
+          <div className="suggestion-list" aria-label={copy.examples}>
             {message.suggestions.map((suggestion) => (
               <button
                 className="suggestion-chip"
@@ -685,34 +695,36 @@ function MessageBubble({
             type="button"
           >
             <Icon name="refresh" size={14} />
-            Повторить
+            {copy.retry}
           </button>
         )}
-        <div className="message-time">{message.time ?? "Только что"}</div>
+        <div className="message-time">{message.time ?? copy.justNow}</div>
       </div>
     </div>
   );
 }
 
-function TypingMessage({ onCancel }) {
+function TypingMessage({ language, onCancel }) {
+  const copy = getMessages(language).chat;
   return (
     <div className="processing-row" role="status">
-      <div className="typing-bubble" aria-label="Ассистент формирует ответ">
+      <div className="typing-bubble" aria-label={copy.typing}>
         <span className="typing-dot" />
         <span className="typing-dot" />
         <span className="typing-dot" />
       </div>
       <div className="processing-copy">
-        <span>Формирую ответ</span>
+        <span>{copy.forming}</span>
         <button className="cancel-button" onClick={onCancel} type="button">
-          Отменить
+          {copy.cancel}
         </button>
       </div>
     </div>
   );
 }
 
-function ConfirmClearDialog({ onCancel, onConfirm }) {
+function ConfirmClearDialog({ language, onCancel, onConfirm }) {
+  const copy = getMessages(language).clearDialog;
   const cancelRef = useRef(null);
   const confirmRef = useRef(null);
 
@@ -742,15 +754,15 @@ function ConfirmClearDialog({ onCancel, onConfirm }) {
         role="alertdialog"
       >
         <div className="dialog-icon"><Icon name="trash" size={18} /></div>
-        <p className="dialog-eyebrow">Текущий диалог</p>
-        <h2 id="clear-dialog-title">Очистить историю?</h2>
-        <p id="clear-dialog-description">Сообщения будут удалены только из этого окна. Новая консультация начнётся с приветствия.</p>
+        <p className="dialog-eyebrow">{copy.eyebrow}</p>
+        <h2 id="clear-dialog-title">{copy.title}</h2>
+        <p id="clear-dialog-description">{copy.description}</p>
         <div className="dialog-actions">
           <button className="button button--secondary" onClick={onCancel} ref={cancelRef} type="button">
-            Отмена
+            {copy.cancel}
           </button>
           <button className="button button--danger" onClick={onConfirm} ref={confirmRef} type="button">
-            Очистить
+            {copy.confirm}
           </button>
         </div>
       </section>
@@ -758,8 +770,9 @@ function ConfirmClearDialog({ onCancel, onConfirm }) {
   );
 }
 
-function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChange }) {
-  const [messages, setMessages] = useState(() => [createWelcomeMessage()]);
+function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCartChange, onEnsureCart, onLanguageChange, onOpenChange }) {
+  const copy = getMessages(language);
+  const [messages, setMessages] = useState(() => [createWelcomeMessage(language)]);
   const [inputValue, setInputValue] = useState("");
   const [phase, setPhase] = useState("idle");
   const [cartRequest, setCartRequest] = useState(null);
@@ -774,6 +787,7 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
   const dialogIdRef = useRef(createId("dialog"));
   const messageVersionRef = useRef(0);
   const proposalRetryRef = useRef(new Map());
+  const languageInitializedRef = useRef(false);
 
   const closeClearDialog = useCallback(() => {
     setIsClearDialogOpen(false);
@@ -844,11 +858,62 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
       return {
         ...message,
         cartPhase: "expired",
-        cartStatusNote: "Это резюме заменено более новым.",
+        cartStatusNote: copy.chat.proposalChanged,
       };
     }
     return message;
-  }), []);
+  }), [copy.chat.proposalChanged]);
+
+  const changeLanguage = useCallback(async (nextLanguage) => {
+    const normalized = normalizeLanguage(nextLanguage);
+    if (normalized === language) return;
+    setMessages((current) => {
+      const active = current.filter((message) => message.cartAction && message.cartPhase === "proposed");
+      const updated = expireActiveSummaries(current);
+      if (!active.length) {
+        return current.length === 1 && current[0]?.id === "welcome"
+          ? [createWelcomeMessage(normalized)]
+          : updated;
+      }
+      return [
+        ...updated,
+        {
+          id: createId("language-summary"),
+          role: "assistant",
+          content: getMessages(normalized).chat.languageSummary,
+          languageSummary: { message: getMessages(normalized).chat.languageSummary, items: [] },
+          time: getTimeLabel(normalized),
+        },
+      ];
+    });
+    onLanguageChange(normalized);
+    try {
+      if (!languageInitializedRef.current) {
+        try {
+          await setChatLanguage(dialogIdRef.current, language);
+        } catch {
+          // A missing CSRF cookie should not block the local safe state transition.
+        }
+        languageInitializedRef.current = true;
+      }
+      const response = await setChatLanguage(dialogIdRef.current, normalized);
+      if (response?.cart_summary?.message) {
+        setMessages((current) => current.map((message) => (
+          message.id.startsWith("language-summary-")
+            ? { ...message, content: response.cart_summary.message, languageSummary: response.cart_summary }
+            : message
+        )));
+      }
+    } catch {
+      // Local invalidation remains active even if the optional language endpoint is unavailable.
+    }
+  }, [expireActiveSummaries, language, onLanguageChange]);
+
+  useEffect(() => {
+    if (languageChangeRequest && languageChangeRequest !== language) {
+      void changeLanguage(languageChangeRequest);
+    }
+  }, [changeLanguage, language, languageChangeRequest]);
 
   const appendReplacement = useCallback((payload, sourceActionId, content) => {
     const replacement = payload?.replacement_action;
@@ -859,7 +924,7 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
     setMessages((current) => {
       const updated = expireActiveSummaries(current).map((message) => (
         message.cartAction?.action_id === sourceActionId
-          ? { ...message, cartPhase: "expired", cartStatusNote: "Данные изменились; используйте новое резюме ниже." }
+          ? { ...message, cartPhase: "expired", cartStatusNote: copy.chat.sourceChanged }
           : message
       ));
       if (!replacement) {
@@ -869,7 +934,7 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
             id: createId("cart-unavailable"),
             role: "assistant",
             content,
-            time: getTimeLabel(),
+            time: getTimeLabel(language),
           },
         ];
       }
@@ -881,11 +946,11 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
           content,
           cartAction: replacement,
           cartPhase: "proposed",
-          time: getTimeLabel(),
+          time: getTimeLabel(language),
         },
       ];
     });
-  }, [expireActiveSummaries, updateCartFromPayload]);
+  }, [copy.chat.sourceChanged, expireActiveSummaries, language, updateCartFromPayload]);
 
   const applyCartSuccess = useCallback((result) => {
     onCartChange(result.cart);
@@ -932,10 +997,10 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
         {
           id: createId("cart-summary"),
           role: "assistant",
-          content: "Проверьте состав действия. Корзина изменится только после подтверждения.",
+          content: copy.chat.summaryNotice,
           cartAction: action,
           cartPhase: "proposed",
-          time: getTimeLabel(),
+          time: getTimeLabel(language),
         },
       ]);
     } catch (error) {
@@ -951,8 +1016,8 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
           response,
           response?.action_id,
           response?.replacement_action
-            ? `Запрошенного количества нет. Подготовил новое резюме на ${response.maximum_quantity} шт.`
-            : "Доступный остаток закончился. Товар не добавлен.",
+            ? copy.chat.maxSummary(response.maximum_quantity)
+            : copy.chat.noStock,
         );
       } else {
         if (["network_error", "csrf_cookie_missing", "csrf_failed"].includes(apiError.code)) {
@@ -974,9 +1039,9 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
           {
             id: createId("cart-error"),
             role: "assistant",
-            content: cartErrorCopy(apiError.code, response),
+            content: cartErrorCopy(apiError.code, response, language),
             error: true,
-            time: getTimeLabel(),
+            time: getTimeLabel(language),
           },
         ]);
       }
@@ -984,7 +1049,7 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
       cartLockRef.current = false;
       setCartRequest(null);
     }
-  }, [appendReplacement, cartStatus, expireActiveSummaries, onEnsureCart, updateCartFromPayload]);
+  }, [appendReplacement, cartStatus, copy.chat.maxSummary, copy.chat.noStock, copy.chat.summaryNotice, expireActiveSummaries, language, onEnsureCart, updateCartFromPayload]);
 
   const confirmAction = useCallback(async (actionId) => {
     if (cartLockRef.current) return;
@@ -1008,8 +1073,8 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
           response,
           actionId,
           apiError.code === "insufficient_stock"
-            ? `Остаток уменьшился. Подготовил новое резюме на ${response.replacement_action.quantity} шт.`
-            : "Цена, остаток или версия корзины изменились. Подтвердите обновлённое резюме.",
+            ? copy.chat.insufficientSummary(response.replacement_action.quantity)
+            : copy.chat.refreshedSummary,
         );
       } else if (["network_error", "csrf_cookie_missing", "csrf_failed", "cart_busy", "action_in_progress"].includes(apiError.code)) {
         try {
@@ -1019,14 +1084,14 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
         }
         setMessages((current) => current.map((message) => (
           message.cartAction?.action_id === actionId
-            ? { ...message, cartPhase: "proposed", cartStatusNote: cartErrorCopy(apiError.code) }
+            ? { ...message, cartPhase: "proposed", cartStatusNote: cartErrorCopy(apiError.code, {}, language) }
             : message
         )));
       } else {
         const nextPhase = ["action_expired", "action_stale"].includes(apiError.code) ? "expired" : "failed";
         setMessages((current) => current.map((message) => (
           message.cartAction?.action_id === actionId
-            ? { ...message, cartPhase: nextPhase, cartStatusNote: cartErrorCopy(apiError.code, response) }
+            ? { ...message, cartPhase: nextPhase, cartStatusNote: cartErrorCopy(apiError.code, response, language) }
             : message
         )));
       }
@@ -1034,7 +1099,7 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
       cartLockRef.current = false;
       setCartRequest(null);
     }
-  }, [appendReplacement, applyCartSuccess, onEnsureCart, updateCartFromPayload]);
+  }, [appendReplacement, applyCartSuccess, copy.chat.insufficientSummary, copy.chat.refreshedSummary, language, onEnsureCart, updateCartFromPayload]);
 
   const confirmByText = useCallback(async (text) => {
     if (cartLockRef.current) return;
@@ -1056,7 +1121,7 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
         appendReplacement(
           response,
           response.action_id,
-          "Предложение изменилось. Проверьте и подтвердите новое резюме.",
+          copy.chat.replacementChanged,
         );
       } else {
         if (["network_error", "csrf_cookie_missing", "csrf_failed"].includes(apiError.code)) {
@@ -1075,9 +1140,9 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
           {
             id: createId("cart-text-error"),
             role: "assistant",
-            content: cartErrorCopy(apiError.code, response),
+            content: cartErrorCopy(apiError.code, response, language),
             error: !["ambiguous_confirmation", "no_active_action", "confirmation_required"].includes(apiError.code),
-            time: getTimeLabel(),
+            time: getTimeLabel(language),
           },
         ]);
       }
@@ -1085,7 +1150,7 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
       cartLockRef.current = false;
       setCartRequest(null);
     }
-  }, [appendReplacement, applyCartSuccess, onEnsureCart, updateCartFromPayload]);
+  }, [appendReplacement, applyCartSuccess, copy.chat.replacementChanged, language, onEnsureCart, updateCartFromPayload]);
 
   const cancelGeneration = useCallback(() => {
     const pending = pendingRef.current;
@@ -1100,11 +1165,11 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
       {
         id: `cancelled-${Date.now()}`,
         role: "assistant",
-        content: "Формирование ответа остановлено. Чем ещё помочь?",
-        time: getTimeLabel(),
+        content: copy.chat.stopped,
+        time: getTimeLabel(language),
       },
     ]);
-  }, []);
+  }, [copy.chat.stopped, language]);
 
   const sendPrompt = useCallback((rawPrompt, { isRetry = false, errorId = "" } = {}) => {
     const prompt = String(rawPrompt).trim().slice(0, MAX_MESSAGE_LENGTH);
@@ -1119,12 +1184,12 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
           id: createId("user"),
           role: "user",
           content: prompt,
-          time: getTimeLabel(),
+        time: getTimeLabel(language),
         },
       ];
     });
 
-    if (TEXT_CONFIRMATIONS.has(normalizeConfirmation(prompt))) {
+    if (TEXT_CONFIRMATIONS.has(normalizeConfirmation(prompt, language))) {
       void confirmByText(prompt);
       return;
     }
@@ -1133,7 +1198,7 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
     const statusTimer = window.setTimeout(() => setPhase("processing"), 280);
     pendingRef.current = { controller, statusTimer };
     setPhase("submitting");
-    requestDemoAnswer(prompt, controller.signal)
+    requestDemoAnswer(prompt, controller.signal, language)
       .then((answer) => {
         if (controller.signal.aborted) return;
         const response = typeof answer === "string" ? { content: answer } : answer;
@@ -1145,10 +1210,10 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
           {
             id: createId("assistant"),
             role: "assistant",
-            content: sanitizeAssistantText(response?.content),
+            content: sanitizeAssistantText(response?.content, language),
             product: response?.product,
             analogComparison: response?.analogComparison,
-            time: getTimeLabel(),
+            time: getTimeLabel(language),
           },
         ]);
       })
@@ -1162,18 +1227,18 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
           {
             id: createId("error"),
             role: "assistant",
-            content: SAFE_ERROR_MESSAGE,
+            content: safeErrorMessage(language),
             error: true,
             retryPrompt: prompt,
-            time: getTimeLabel(),
+            time: getTimeLabel(language),
           },
         ]);
       });
-  }, [confirmByText]);
+  }, [confirmByText, language]);
 
   const clearHistory = useCallback(() => {
     if (pendingRef.current) cancelGeneration();
-    setMessages([createWelcomeMessage()]);
+    setMessages([createWelcomeMessage(language)]);
     setInputValue("");
     setPhase("idle");
     setCartRequest(null);
@@ -1183,7 +1248,7 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
     proposalRetryRef.current.clear();
     setIsClearDialogOpen(false);
     requestAnimationFrame(() => inputRef.current?.focus());
-  }, [cancelGeneration]);
+  }, [cancelGeneration, language]);
 
   const handleSubmit = (event) => {
     event.preventDefault();
@@ -1191,18 +1256,18 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
   };
 
   const statusLabel = cartRequest
-    ? "Проверяет корзину"
+    ? copy.chat.status.cart
     : phase === "processing" || phase === "submitting"
-    ? "Формирует ответ"
+    ? copy.chat.status.forming
     : phase === "error"
-      ? "Нужна повторная попытка"
-      : "Онлайн · отвечает за несколько секунд";
+      ? copy.chat.status.retry
+      : copy.chat.status.online;
 
   return (
     <>
       <button
         aria-expanded={isOpen}
-        aria-label={isOpen ? "Закрыть чат с консультантом" : "Открыть чат с консультантом"}
+        aria-label={isOpen ? copy.chat.close : copy.chat.open}
         className="chat-launcher"
         onClick={() => onOpenChange(!isOpen)}
         ref={launcherRef}
@@ -1210,15 +1275,15 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
       >
         <span className="launcher-icon"><Icon name="bot" size={18} /></span>
         <span className="launcher-copy">
-          <strong>Помощь с выбором</strong>
-          <small>AI-консультант</small>
+          <strong>{copy.chat.launcher}</strong>
+          <small>{copy.chat.ai}</small>
         </span>
         <span className="launcher-pulse" />
       </button>
 
       {isOpen && (
         <aside
-          aria-label="Чат-консультант EKT.kz"
+          aria-label={copy.chat.dialog}
           aria-modal="false"
           className="chat-widget"
           role="dialog"
@@ -1227,7 +1292,7 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
             <div className="assistant-identity">
               <div className="assistant-avatar"><Icon name="bot" size={19} /></div>
               <div className="assistant-title-wrap">
-                <strong>EKT Консультант</strong>
+                <strong>{copy.chat.title}</strong>
                 <span className={`assistant-status ${phase === "error" ? "assistant-status--error" : ""}`}>
                   <span className="status-dot" />
                   {statusLabel}
@@ -1236,24 +1301,24 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
             </div>
             <div className="chat-header-actions">
               <button
-                aria-label="Очистить историю"
+                aria-label={copy.chat.clear}
                 className="icon-button"
                 disabled={Boolean(cartRequest)}
                 onClick={() => setIsClearDialogOpen(true)}
                 ref={clearButtonRef}
-                title="Очистить историю"
+                title={copy.chat.clear}
                 type="button"
               >
                 <Icon name="trash" size={17} />
               </button>
               <button
-                aria-label="Закрыть чат"
+                aria-label={copy.chat.closeShort}
                 className="icon-button"
                 onClick={() => {
                   onOpenChange(false);
                   launcherRef.current?.focus();
                 }}
-                title="Закрыть чат"
+                title={copy.chat.closeShort}
                 type="button"
               >
                 <Icon name="close" size={18} />
@@ -1268,12 +1333,13 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
             role="log"
             aria-live="polite"
           >
-            <div className="chat-date"><span /> Сегодня <span /></div>
+            <div className="chat-date"><span /> {copy.chat.today} <span /></div>
             {messages.map((message) => (
               <MessageBubble
                 key={message.id}
                 cartStatus={cartStatus}
                 cartRequest={cartRequest}
+                language={language}
                 message={message}
                 onConfirmAction={confirmAction}
                 onCreateProposal={createProposal}
@@ -1284,16 +1350,16 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
                 onSuggestion={sendPrompt}
               />
             ))}
-            {(phase === "submitting" || phase === "processing") && <TypingMessage onCancel={cancelGeneration} />}
+            {(phase === "submitting" || phase === "processing") && <TypingMessage language={language} onCancel={cancelGeneration} />}
           </div>
 
           <div className="chat-composer-wrap">
             <p className="composer-hint" role="status">
               <Icon name="sparkle" size={13} />
-              Ответы основаны на данных каталога EKT.kz
+              {copy.chat.catalogBasis}
             </p>
             <form className="chat-composer" onSubmit={handleSubmit}>
-              <label className="sr-only" htmlFor="message-input">Введите сообщение</label>
+              <label className="sr-only" htmlFor="message-input">{copy.chat.inputLabel}</label>
               <textarea
                 aria-describedby="composer-disclaimer"
                 autoComplete="off"
@@ -1307,7 +1373,7 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
                     sendPrompt(inputValue);
                   }
                 }}
-                placeholder="Например: нужен кабель 3×2,5 мм²"
+                placeholder={copy.chat.placeholder}
                 ref={inputRef}
                 rows={1}
                 value={inputValue}
@@ -1315,7 +1381,7 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
               <div className="composer-actions">
                 <span className="composer-counter">{inputValue.length}/{MAX_MESSAGE_LENGTH}</span>
                 <button
-                  aria-label="Отправить сообщение"
+                  aria-label={copy.chat.send}
                   className="send-button"
                   disabled={Boolean(pendingRef.current) || Boolean(cartRequest) || !inputValue.trim()}
                   type="submit"
@@ -1325,26 +1391,22 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
               </div>
             </form>
             <p className="composer-disclaimer" id="composer-disclaimer">
-              Не вводите платёжные данные и пароли
+              {copy.chat.disclaimer}
             </p>
           </div>
         </aside>
       )}
 
       {isClearDialogOpen && (
-        <ConfirmClearDialog onCancel={closeClearDialog} onConfirm={clearHistory} />
+        <ConfirmClearDialog language={language} onCancel={closeClearDialog} onConfirm={clearHistory} />
       )}
     </>
   );
 }
 
-function SitePreview({ cart, onOpenChat }) {
-  const categories = [
-    ["Кабель / провод", "Кабель, провод и аксессуары", "#d9f3e9"],
-    ["Светильники", "LED, лампы и управление светом", "#e3edff"],
-    ["Низковольтная аппаратура", "Автоматика и защита сетей", "#fff0cc"],
-    ["Монтаж и инструмент", "Всё для надёжного монтажа", "#f1e5ff"],
-  ];
+function SitePreview({ cart, language, onLanguageRequest, onOpenChat }) {
+  const copy = getMessages(language).site;
+  const categories = copy.categories.map(([title, description], index) => [title, description, ["#d9f3e9", "#e3edff", "#fff0cc", "#f1e5ff"][index]]);
   const cartCount = Array.isArray(cart?.items)
     ? cart.items.reduce((total, item) => total + (toFiniteNumber(item?.quantity) ?? 0), 0)
     : 0;
@@ -1352,50 +1414,64 @@ function SitePreview({ cart, onOpenChat }) {
   return (
     <main className="site-preview">
       <nav className="site-nav">
-        <a className="brand" href="#top" aria-label="EKT.kz, на главную">
+        <a className="brand" href="#top" aria-label={copy.brand}>
           <span className="brand-mark">E</span>
           <span>EKT<span className="brand-dot">.</span>kz</span>
         </a>
-        <div className="site-nav-links" aria-label="Основная навигация">
-          <a href="#catalog">Каталог</a>
-          <a href="#delivery">Доставка</a>
-          <a href="#contacts">Контакты</a>
+        <div className="site-nav-links" aria-label={copy.nav}>
+          <a href="#catalog">{copy.catalog}</a>
+          <a href="#delivery">{copy.delivery}</a>
+          <a href="#contacts">{copy.contacts}</a>
         </div>
-        <a
-          aria-label={`Открыть корзину, товаров: ${cartCount}`}
-          className="cart-button"
-          href={cart?.url || "/demo/cart/"}
-          rel="noopener noreferrer"
-          target="_blank"
-        >
-          <Icon name="cart" size={16} />
-          Корзина <span className="cart-count">{cartCount}</span>
-        </a>
+        <div className="site-nav-actions">
+          <div className="site-language-switcher" aria-label={copy.languageSwitcher}>
+            {Object.entries(LOCALES).map(([key, locale]) => (
+              <button
+                aria-label={locale.label}
+                aria-pressed={language === key}
+                className={`site-language-button${language === key ? " site-language-button--active" : ""}`}
+                key={key}
+                onClick={() => onLanguageRequest(key)}
+                type="button"
+              >
+                {locale.short}
+              </button>
+            ))}
+          </div>
+          <a
+            aria-label={copy.cartAria(cartCount)}
+            className="cart-button"
+            href={cart?.url || "/demo/cart/"}
+            rel="noopener noreferrer"
+            target="_blank"
+          >
+            <Icon name="cart" size={16} />
+            {copy.cart} <span className="cart-count">{cartCount}</span>
+          </a>
+        </div>
       </nav>
 
       <section className="hero-preview" id="top">
         <div className="hero-copy">
-          <p className="eyebrow">Электротехника для дома и бизнеса</p>
-          <h1>Подберём решение под вашу задачу</h1>
-          <p className="hero-description">
-            Кабель, освещение, низковольтная аппаратура и комплектующие — с понятной консультацией в чате.
-          </p>
+          <p className="eyebrow">{copy.eyebrow}</p>
+          <h1>{copy.hero}</h1>
+          <p className="hero-description">{copy.description}</p>
           <div className="hero-actions">
-            <a className="primary-button" href="#catalog">Открыть каталог</a>
-            <button className="text-button" onClick={onOpenChat} type="button">Задать вопрос <span>↗</span></button>
+            <a className="primary-button" href="#catalog">{copy.openCatalog}</a>
+            <button className="text-button" onClick={onOpenChat} type="button">{copy.ask} <span>↗</span></button>
           </div>
         </div>
-        <div className="hero-card" aria-label="Демо-статистика каталога">
+        <div className="hero-card" aria-label={copy.stats}>
           <div className="hero-card-top"><span className="hero-card-live"><span /> DEMO PREVIEW</span><span>2026</span></div>
-          <div className="hero-card-label">Каталог рядом</div>
+          <div className="hero-card-label">{copy.catalogNearby}</div>
           <div className="hero-card-value">14<span>k</span></div>
-          <div className="hero-card-caption">страниц категорий и товаров</div>
+          <div className="hero-card-caption">{copy.pages}</div>
           <div className="hero-card-chart"><i /><i /><i /><i /><i /><i /><i /></div>
         </div>
       </section>
 
       <section className="category-section" id="catalog">
-        <div className="section-heading"><div><span className="section-overline">КАТАЛОГ EKT</span><h2>Найдите нужное с первого запроса</h2></div><span className="section-note">12 направлений</span></div>
+        <div className="section-heading"><div><span className="section-overline">{copy.overline}</span><h2>{copy.find}</h2></div><span className="section-note">{copy.directions}</span></div>
         <div className="category-grid">
           {categories.map(([title, description, color], index) => (
             <a className="category-card" href="#catalog" key={title}>
@@ -1409,22 +1485,25 @@ function SitePreview({ cart, onOpenChat }) {
         </div>
       </section>
 
-      <section className="site-footer-strip" id="delivery"><span>Проверенная консультация</span><span>·</span><span id="contacts">Алматы · Астана · Шымкент · и ещё 6 городов</span></section>
+      <section className="site-footer-strip" id="delivery"><span>{copy.footer}</span><span>·</span><span id="contacts">{copy.cities}</span></section>
     </main>
   );
 }
 
-function CookieBanner({ onClose }) {
+function CookieBanner({ language, onClose }) {
+  const copy = getMessages(language).cookie;
   return (
-    <aside className="cookie-banner" aria-label="Уведомление о cookie">
-      <div className="cookie-copy"><strong>Мы используем cookie</strong><p>Они помогают сделать сайт удобнее.</p></div>
-      <button className="cookie-close" onClick={onClose} type="button">Понятно</button>
+    <aside className="cookie-banner" aria-label={copy.aria}>
+      <div className="cookie-copy"><strong>{copy.title}</strong><p>{copy.text}</p></div>
+      <button className="cookie-close" onClick={onClose} type="button">{copy.close}</button>
     </aside>
   );
 }
 
 export default function App() {
   const [showCookie, setShowCookie] = useState(true);
+  const [language, setLanguage] = useState(DEFAULT_LANGUAGE);
+  const [languageChangeRequest, setLanguageChangeRequest] = useState(null);
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [cart, setCart] = useState({ items: [], total: "0.00", url: "/demo/cart/" });
   const [cartStatus, setCartStatus] = useState("loading");
@@ -1462,16 +1541,24 @@ export default function App() {
 
   return (
     <>
-      <SitePreview cart={cart} onOpenChat={() => setIsChatOpen(true)} />
-      {showCookie && <CookieBanner onClose={() => setShowCookie(false)} />}
+      <SitePreview
+        cart={cart}
+        language={language}
+        onLanguageRequest={setLanguageChangeRequest}
+        onOpenChat={() => setIsChatOpen(true)}
+      />
+      {showCookie && <CookieBanner language={language} onClose={() => setShowCookie(false)} />}
       <ChatWidget
         cartStatus={cartStatus}
         isOpen={isChatOpen}
+        language={language}
+        languageChangeRequest={languageChangeRequest}
         onCartChange={(snapshot) => {
           setCart(snapshot);
           setCartStatus("ready");
         }}
         onEnsureCart={refreshCart}
+        onLanguageChange={setLanguage}
         onOpenChange={setIsChatOpen}
       />
     </>

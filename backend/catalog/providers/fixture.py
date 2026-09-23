@@ -211,4 +211,9 @@ class FixtureCatalogProvider:
             availability=payload["availability"],
             fetched_at=fetched_at,
         )
+        payload["cart_policy"] = {
+            "automatic_add_allowed": False,
+            "requires_explicit_confirmation": True,
+            "offers_schema_supported": bool(payload.get("offers")),
+        }
         return payload

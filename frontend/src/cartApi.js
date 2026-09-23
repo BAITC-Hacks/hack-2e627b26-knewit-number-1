@@ -88,3 +88,10 @@ export function confirmCartText(dialogId, confirmationText) {
     text: confirmationText,
   });
 }
+
+export function setChatLanguage(dialogId, language) {
+  return postJson("/api/chat/language", {
+    dialog_id: dialogId,
+    language,
+  });
+}
