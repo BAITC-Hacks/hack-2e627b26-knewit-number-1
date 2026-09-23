@@ -70,8 +70,36 @@ export function getCart(options = {}) {
   return requestJson("/api/cart", options);
 }
 
+export function getProducts(page = 1, options = {}) {
+  return requestJson(`/api/products?page=${encodeURIComponent(page)}`, options);
+}
+
+function normalizeProductPayload(payload) {
+  const normalized = payload?.normalized;
+  if (!normalized || typeof normalized !== "object") return payload;
+
+  const normalizedPrice = normalized.price;
+  const normalizedAvailability = normalized.availability;
+
+  return {
+    ...payload,
+    ...normalized,
+    // ProductCard expects the legacy flat fields while the backend's
+    // canonical contract keeps price nested under normalized.price.
+    price: normalizedPrice?.amount ?? payload.price,
+    currency: normalizedPrice?.currency ?? payload.currency,
+    verified_at: normalizedPrice?.verified_at ?? normalizedAvailability?.verified_at ?? payload.verified_at,
+    availability: normalizedAvailability ?? payload.availability,
+    quantity: payload.quantity ?? normalizedAvailability?.sellable_quantity,
+    image: normalized.image_url ?? payload.image,
+    url: normalized.product_url ?? payload.url,
+    properties: normalized.properties_raw ?? payload.properties,
+  };
+}
+
 export function getProduct(productId, options = {}) {
-  return requestJson(`/api/products/detail?id=${encodeURIComponent(productId)}`, options);
+  return requestJson(`/api/products/detail?id=${encodeURIComponent(productId)}`, options)
+    .then(normalizeProductPayload);
 }
 
 export function createCartAction(payload) {

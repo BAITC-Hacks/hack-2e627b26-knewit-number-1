@@ -94,7 +94,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "").strip()
 OPENAI_TIMEOUT_SECONDS = min(30.0, max(1.0, float(os.environ.get("OPENAI_TIMEOUT_SECONDS", "12"))))
 
-CATALOG_PROVIDER = os.environ.get("CATALOG_PROVIDER", "fixture").strip().lower()
+CATALOG_PROVIDER = os.environ.get("CATALOG_PROVIDER", "ekt").strip().lower()
 CATALOG_DEFAULT_CURRENCY = os.environ.get("CATALOG_DEFAULT_CURRENCY", "KZT").strip() or None
 EKT_API_BASE_URL = os.environ.get("EKT_API_BASE_URL", "https://ekt.kz/api").rstrip("/")
 EKT_API_USERNAME = os.environ.get("EKT_API_USERNAME", "")

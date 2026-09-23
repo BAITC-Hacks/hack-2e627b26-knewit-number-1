@@ -5,11 +5,11 @@ import {
   confirmCartText,
   createCartAction,
   getCart,
+  getProducts,
   getProduct,
 } from "./cartApi.js";
 
 const MAX_MESSAGE_LENGTH = 1200;
-const DEMO_PRODUCT_ID = 900001;
 const TEXT_CONFIRMATIONS = new Set(["да", "подтверждаю", "добавить в корзину"]);
 const SAFE_ERROR_MESSAGE =
   "Не удалось получить ответ. Проверьте соединение и попробуйте ещё раз.";
@@ -172,9 +172,19 @@ async function createAssistantResponse(prompt, signal) {
   }
 
   if (normalized.includes("автомат") || normalized.includes("legrand")) {
-    const product = await getProduct(DEMO_PRODUCT_ID, { signal });
+    const results = await Promise.all([
+      getProducts(1, { signal }),
+      getProducts(2, { signal }),
+    ]);
+    const candidate = results
+      .flatMap((result) => Array.isArray(result?.items) ? result.items : [])
+      .find((item) => /авт|legrand/i.test(String(item?.name ?? "")));
+    if (!candidate?.id) {
+      return "В первых двух страницах API EKT.kz подходящий товар не найден.";
+    }
+    const product = await getProduct(candidate.id, { signal });
     return {
-      content: "Нашёл демонстрационную позицию в каталоге. Укажите количество и проверьте резюме перед добавлением:",
+      content: "Нашёл товар в каталоге EKT.kz. Укажите количество и проверьте резюме перед добавлением:",
       product: { ...product, verified_at: new Date().toISOString() },
     };
   }
@@ -1338,6 +1348,177 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
   );
 }
 
+function catalogProductValue(product, key) {
+  return product?.[key] ?? product?.normalized?.[key];
+}
+
+function CatalogProductCard({ product }) {
+  const id = catalogProductValue(product, "id");
+  const name = catalogProductValue(product, "name") || "Без названия";
+  const article = catalogProductValue(product, "article");
+  const image = product?.image || product?.image_url || product?.normalized?.image_url;
+  const price = typeof product?.price === "object" ? product.price?.amount : product?.price;
+  const availability = product?.availability || product?.normalized?.availability;
+  const stock = availability?.sellable_quantity ?? product?.quantity;
+
+  return (
+    <a className="catalog-product-card" href={`#product/${id}`}>
+      <div className="catalog-product-image">
+        {image ? <img alt={name} src={image} /> : <span>EKT</span>}
+      </div>
+      <div className="catalog-product-info">
+        <h3>{name}</h3>
+        {article && <p className="catalog-article">Артикул: {article}</p>}
+        <div className="catalog-product-footer">
+          <strong>{price != null ? `${price} ₸` : "Цена уточняется"}</strong>
+          <span className={stock > 0 ? "catalog-stock catalog-stock--available" : "catalog-stock"}>
+            {stock > 0 ? `В наличии: ${stock}` : "Наличие уточняется"}
+          </span>
+        </div>
+      </div>
+    </a>
+  );
+}
+
+function CatalogPage() {
+  const [items, setItems] = useState([]);
+  const [query, setQuery] = useState("");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  const loadCatalog = useCallback(async () => {
+    setLoading(true);
+    setError("");
+    try {
+      // The case scope includes the first two API pages.
+      const results = await Promise.all([getProducts(1), getProducts(2)]);
+      if (results.some((result) => result?.data_source !== "ekt")) {
+        throw new Error("catalog_source_not_ekt");
+      }
+      const uniqueItems = new Map();
+      results.forEach((result) => {
+        (Array.isArray(result?.items) ? result.items : []).forEach((item) => {
+          if (item?.id !== undefined && !uniqueItems.has(item.id)) uniqueItems.set(item.id, item);
+        });
+      });
+      setItems([...uniqueItems.values()]);
+    } catch {
+      setError("Не удалось загрузить каталог. Проверьте соединение с API EKT.kz.");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { loadCatalog(); }, [loadCatalog]);
+
+  const filteredItems = items.filter((item) => {
+    const haystack = [item?.name, item?.article, item?.id].join(" ").toLowerCase();
+    return haystack.includes(query.trim().toLowerCase());
+  });
+
+  return (
+    <main className="catalog-page">
+      <div className="catalog-page-header">
+        <div>
+          <a className="catalog-back" href="#top">← На главную</a>
+          <p className="eyebrow">Каталог EKT.kz</p>
+          <h1>Электротехническая продукция</h1>
+          <p>Актуальные товары из каталога партнёра. Откройте карточку, чтобы посмотреть характеристики и наличие.</p>
+        </div>
+        <input
+          aria-label="Поиск по каталогу"
+          className="catalog-search"
+          onChange={(event) => setQuery(event.target.value)}
+          placeholder="Поиск по названию или артикулу"
+          value={query}
+        />
+      </div>
+      {error && <div className="catalog-error">{error}</div>}
+      {loading && items.length === 0 && <div className="catalog-loading">Загружаем товары из API EKT.kz…</div>}
+      {!loading && !error && filteredItems.length === 0 && <div className="catalog-loading">Товары не найдены.</div>}
+      <div className="catalog-product-grid">
+        {filteredItems.map((product) => <CatalogProductCard key={product.id} product={product} />)}
+      </div>
+    </main>
+  );
+}
+
+function ProductDetailPage({ productId }) {
+  const [product, setProduct] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError("");
+    getProduct(productId, { signal: controller.signal })
+      .then((payload) => {
+        if (payload?.data_source !== "ekt") {
+          const sourceError = new Error("catalog_source_not_ekt");
+          sourceError.code = "catalog_source_not_ekt";
+          throw sourceError;
+        }
+        setProduct(payload);
+      })
+      .catch((requestError) => {
+        if (requestError.name === "AbortError") return;
+        if (requestError?.payload?.data_source && requestError.payload.data_source !== "ekt") {
+          setError("Этот товар не загружен: источник не является API EKT.kz.");
+          return;
+        }
+        if (requestError?.code === "catalog_source_not_ekt") {
+          setError("Этот товар не загружен: источник не является API EKT.kz.");
+          return;
+        }
+        if (requestError instanceof CartApiError) {
+          setError(`Не удалось загрузить информацию о товаре: ${requestError.code} (${requestError.status || "network"}).`);
+          return;
+        }
+        setError("Не удалось загрузить информацию о товаре: network_error.");
+      })
+      .finally(() => setLoading(false));
+    return () => controller.abort();
+  }, [productId]);
+
+  const normalized = product?.normalized || product;
+  const properties = normalized?.properties_raw || product?.properties || {};
+  const image = product?.image || normalized?.image_url;
+
+  return (
+    <main className="product-detail-page">
+      <a className="catalog-back" href="#catalog">← Вернуться в каталог</a>
+      {loading && <div className="catalog-loading">Загружаем информацию о товаре…</div>}
+      {error && <div className="catalog-error">{error}</div>}
+      {!loading && !error && product && (
+        <>
+          <p className="eyebrow">Карточка товара EKT.kz</p>
+          <h1>{normalized.name || "Без названия"}</h1>
+          <div className="product-detail-layout">
+            <div className="product-detail-image">{image ? <img alt={normalized.name} src={image} /> : <span>EKT</span>}</div>
+            <section className="product-detail-summary">
+              <p className="catalog-article">Артикул: {normalized.article || "не указан"}</p>
+              <strong className="product-detail-price">
+                {normalized.price?.amount ?? product.price ?? "Цена уточняется"} {normalized.price?.currency || "₸"}
+              </strong>
+              <p>{normalized.description || product.description || "Описание отсутствует в источнике."}</p>
+              <div className="product-detail-stock">
+                {normalized.availability?.sellable_quantity ?? product.quantity ?? "—"} шт. доступно для продажи
+              </div>
+            </section>
+          </div>
+          <section className="product-properties">
+            <h2>Характеристики</h2>
+            {Object.keys(properties).length ? Object.entries(properties).map(([key, value]) => (
+              <div className="product-property" key={key}><span>{key}</span><strong>{Array.isArray(value) ? value.join(", ") : String(value)}</strong></div>
+            )) : <p>Характеристики отсутствуют в источнике.</p>}
+          </section>
+        </>
+      )}
+    </main>
+  );
+}
+
 function SitePreview({ cart, onOpenChat }) {
   const categories = [
     ["Кабель / провод", "Кабель, провод и аксессуары", "#d9f3e9"],
@@ -1426,8 +1607,15 @@ function CookieBanner({ onClose }) {
 export default function App() {
   const [showCookie, setShowCookie] = useState(true);
   const [isChatOpen, setIsChatOpen] = useState(false);
+  const [route, setRoute] = useState(window.location.hash);
   const [cart, setCart] = useState({ items: [], total: "0.00", url: "/demo/cart/" });
   const [cartStatus, setCartStatus] = useState("loading");
+
+  useEffect(() => {
+    const onHashChange = () => setRoute(window.location.hash);
+    window.addEventListener("hashchange", onHashChange);
+    return () => window.removeEventListener("hashchange", onHashChange);
+  }, []);
 
   const refreshCart = useCallback(async () => {
     setCartStatus("loading");
@@ -1462,7 +1650,13 @@ export default function App() {
 
   return (
     <>
-      <SitePreview cart={cart} onOpenChat={() => setIsChatOpen(true)} />
+      {route === "#catalog" ? (
+        <CatalogPage />
+      ) : route.startsWith("#product/") ? (
+        <ProductDetailPage productId={route.slice("#product/".length)} />
+      ) : (
+        <SitePreview cart={cart} onOpenChat={() => setIsChatOpen(true)} />
+      )}
       {showCookie && <CookieBanner onClose={() => setShowCookie(false)} />}
       <ChatWidget
         cartStatus={cartStatus}
