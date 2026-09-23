@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 
 const MAX_MESSAGE_LENGTH = 1200;
 const SAFE_ERROR_MESSAGE =
