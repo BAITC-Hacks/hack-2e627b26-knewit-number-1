@@ -1,0 +1,87 @@
+- generic [ref=e1]:
+  - main "Демонстрационная страница магазина" [ref=e2]:
+    - navigation [ref=e3]:
+      - link "EKT.kz, на главную" [ref=e4] [cursor=pointer]:
+        - /url: "#"
+        - generic [ref=e5]: E
+        - generic [ref=e6]: EKT.kz
+      - generic "Основная навигация" [ref=e7]:
+        - link "Каталог" [ref=e8] [cursor=pointer]:
+          - /url: "#catalog"
+        - link "Доставка" [ref=e9] [cursor=pointer]:
+          - /url: "#delivery"
+        - link "Контакты" [ref=e10] [cursor=pointer]:
+          - /url: "#contacts"
+      - button "Открыть корзину" [ref=e11] [cursor=pointer]:
+        - text: Корзина
+        - generic [ref=e12]: "0"
+    - generic [ref=e13]:
+      - generic [ref=e14]:
+        - paragraph [ref=e15]: Электротехника для дома и бизнеса
+        - heading "Подберём нужное решение для вашей задачи" [level=1] [ref=e16]
+        - paragraph [ref=e17]: Кабель, освещение, низковольтная аппаратура и комплектующие — с актуальной информацией по товарам и наличию.
+        - generic [ref=e18]:
+          - link "Открыть каталог" [ref=e19] [cursor=pointer]:
+            - /url: "#catalog"
+          - button "Задать вопрос" [ref=e20] [cursor=pointer]
+      - generic [aria-hidden] [ref=e21]:
+        - generic [ref=e23]: В наличии сегодня
+        - generic [ref=e24]: 12 480
+        - generic [ref=e25]: позиций в каталоге
+    - region "Категории товаров" [ref=e31]:
+      - generic [ref=e32]:
+        - generic [ref=e33]: ⌁
+        - text: Кабель и провод
+      - generic [ref=e34]:
+        - generic [ref=e35]: ◉
+        - text: Светильники
+      - generic [ref=e36]:
+        - generic [ref=e37]: ▣
+        - text: Низковольтная аппаратура
+      - generic [ref=e38]:
+        - generic [ref=e39]: ⌗
+        - text: Монтаж и инструмент
+  - complementary "Уведомление о cookie" [ref=e40]:
+    - generic [ref=e41]:
+      - strong [ref=e42]: Мы используем cookie
+      - paragraph [ref=e43]: Они помогают сделать сайт удобнее.
+    - button "Понятно" [ref=e44] [cursor=pointer]
+  - button "Открыть чат с консультантом" [expanded] [ref=e45] [cursor=pointer]:
+    - generic [ref=e50]: Помощь с выбором
+  - region "Чат-консультант EKT.kz" [ref=e51]:
+    - generic [ref=e52]:
+      - generic [ref=e58]:
+        - generic [ref=e59]: EKT Консультант
+        - generic [ref=e60]: Онлайн · отвечает за несколько секунд
+      - generic [ref=e62]:
+        - button "Очистить историю" [ref=e63] [cursor=pointer]
+        - button "Закрыть чат" [ref=e66] [cursor=pointer]
+    - generic [ref=e69]:
+      - generic [ref=e70]: СЕГОДНЯ
+      - generic [ref=e72]:
+        - paragraph [ref=e73]: Здравствуйте! Я помогу найти электротехнический товар, проверить наличие и подобрать подходящий вариант.
+        - paragraph [ref=e74]: Что вы ищете?
+        - generic "Примеры запросов" [ref=e75]:
+          - button "Автомат Legrand на 160 А" [ref=e76] [cursor=pointer]
+          - button "Кабель для квартиры" [ref=e77] [cursor=pointer]
+          - button "Условия доставки" [ref=e78] [cursor=pointer]
+        - generic [ref=e79]: Только что
+    - generic [ref=e80]:
+      - status [ref=e81]: Ответы основаны на данных каталога EKT.kz
+      - generic [ref=e82]:
+        - generic [ref=e83]: Введите сообщение
+        - textbox "Введите сообщение" [active] [ref=e84]:
+          - /placeholder: "Например: нужен кабель 3×2,5 мм²"
+        - generic [ref=e85]:
+          - button "Прикрепить файл" [disabled] [ref=e86] [cursor=pointer]
+          - generic [ref=e89]: 0/1200
+          - button "Отправить сообщение" [disabled] [ref=e90]
+      - paragraph [ref=e94]: Не вводите платёжные данные и пароли в чат.
+  - generic [aria-hidden]:
+    - dialog:
+      - generic [aria-hidden]: ↺
+      - heading [level=2]: Очистить историю?
+      - paragraph: Текущий диалог будет удалён только из этого окна.
+      - generic:
+        - button: Отмена
+        - button: Очистить
