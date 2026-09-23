@@ -157,7 +157,10 @@ CATALOG_SEARCH_MAX_RESULTS = max(1, int(os.environ.get("CATALOG_SEARCH_MAX_RESUL
 
 # OpenAI is an optional server-side capability. The deterministic catalog/KB
 # path remains available when it is disabled or temporarily unavailable.
-OPENAI_ENABLED = os.environ.get("OPENAI_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+OPENAI_ENABLED = (
+    os.environ.get("OPENAI_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+    or ASSISTANT_LLM_PROVIDER == "openai"
+)
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
 OPENAI_API_BASE_URL = os.environ.get(
     "OPENAI_API_BASE_URL", "https://api.openai.com/v1"

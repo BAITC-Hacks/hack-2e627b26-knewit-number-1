@@ -865,6 +865,14 @@ function MessageBubble({
         {paragraphs.map((paragraph, index) => (
           <p key={`${message.id}-paragraph-${index}`}>{paragraph}</p>
         ))}
+        {message.recommendation && (
+          <div className="message-recommendation">
+            <p>{sanitizeAssistantText(message.recommendation, language)}</p>
+            {message.recommendation_reason && (
+              <p>{sanitizeAssistantText(message.recommendation_reason, language)}</p>
+            )}
+          </div>
+        )}
         {message.attachment && (
           <div className="message-attachment" aria-label={`${copy.attachmentReady}: ${message.attachment.name || message.attachment.file?.name}`}>
             <Icon name="attachment" size={14} />

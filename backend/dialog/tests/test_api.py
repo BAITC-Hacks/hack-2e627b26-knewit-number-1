@@ -1,6 +1,6 @@
 import json
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 
 
 class DialogApiTests(TestCase):
@@ -21,6 +21,33 @@ class DialogApiTests(TestCase):
         self.assertEqual(body["state"], "idle")
         self.assertEqual(body["history"][0]["role"], "assistant")
         self.assertTrue(body["history"][0]["suggestions"])
+
+    @override_settings(OPENAI_ENABLED=False, OPENAI_API_KEY="")
+    def test_greeting_does_not_search_catalog_or_return_products(self):
+        response = self.post_message("\u0441\u0430\u043b\u0430\u043c")
+
+        self.assertEqual(response.status_code, 200)
+        message = response.json()["message"]
+        self.assertEqual(message["products"], [])
+        self.assertIn("\u0417\u0434\u0440\u0430\u0432\u0441\u0442\u0432\u0443\u0439\u0442\u0435", message["content"])
+
+    @override_settings(OPENAI_ENABLED=False, OPENAI_API_KEY="")
+    def test_capability_question_is_text_only(self):
+        response = self.post_message("\u0447\u0442\u043e \u0442\u044b \u0443\u043c\u0435\u0435\u0448\u044c")
+
+        self.assertEqual(response.status_code, 200)
+        message = response.json()["message"]
+        self.assertEqual(message["products"], [])
+        self.assertIn("\u043d\u0430\u0439\u0442\u0438 \u0442\u043e\u0432\u0430\u0440", message["content"])
+
+    @override_settings(OPENAI_ENABLED=False, OPENAI_API_KEY="")
+    def test_bare_find_product_request_asks_for_product_details(self):
+        response = self.post_message("\u043d\u0430\u0439\u0434\u0438 \u0442\u043e\u0432\u0430\u0440")
+
+        self.assertEqual(response.status_code, 200)
+        message = response.json()["message"]
+        self.assertEqual(message["products"], [])
+        self.assertIn("\u0430\u0440\u0442\u0438\u043a\u0443\u043b", message["content"])
 
     def test_context_resolves_second_variant_and_add_quantity(self):
         first = self.post_message("светильник")

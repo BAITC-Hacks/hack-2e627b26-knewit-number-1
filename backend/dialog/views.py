@@ -34,6 +34,27 @@ from knowledge_base.engine import answer_query
 
 MAX_HISTORY = 50
 MAX_MESSAGE_LENGTH = 1200
+_GREETING_WORDS = {
+    "привет",
+    "здравствуйте",
+    "здравствуй",
+    "добрый день",
+    "доброе утро",
+    "добрый вечер",
+    "салам",
+    "сәлем",
+    "сәлеметсіз бе",
+}
+_CAPABILITY_PHRASES = {
+    "\u0447\u0442\u043e \u0442\u044b \u0443\u043c\u0435\u0435\u0448\u044c",
+    "\u0447\u0442\u043e \u0442\u044b \u0443\u043c\u0435\u0435\u0448\u044c?",
+    "\u043a\u0430\u043a \u0442\u044b \u0440\u0430\u0431\u043e\u0442\u0430\u0435\u0448\u044c",
+}
+_PRODUCT_CLARIFICATION_PHRASES = {
+    "\u043d\u0430\u0439\u0434\u0438 \u0442\u043e\u0432\u0430\u0440",
+    "\u043f\u043e\u043a\u0430\u0436\u0438 \u0442\u043e\u0432\u0430\u0440",
+    "\u043d\u0443\u0436\u0435\u043d \u0442\u043e\u0432\u0430\u0440",
+}
 _REFERENCE_WORDS = ("этот товар", "этот вариант", "эту позицию", "этот")
 _SECOND_WORDS = ("второй", "2-й", "2й")
 
@@ -129,6 +150,22 @@ def _resolve_reference(dialog: dict[str, Any], text: str) -> dict[str, Any] | No
 
 
 def _search_answer(text: str) -> tuple[str, list[dict[str, Any]]]:
+    normalized = re.sub(r"[!?.,:;]+", "", text.casefold()).strip()
+    if normalized in _CAPABILITY_PHRASES:
+        return (
+            "\u042f \u043c\u043e\u0433\u0443 \u043d\u0430\u0439\u0442\u0438 \u0442\u043e\u0432\u0430\u0440 \u043f\u043e \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u044e, \u0430\u0440\u0442\u0438\u043a\u0443\u043b\u0443 \u0438\u043b\u0438 \u0445\u0430\u0440\u0430\u043a\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043a\u0430\u043c, \u043f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c \u0446\u0435\u043d\u0443 \u0438 \u043d\u0430\u043b\u0438\u0447\u0438\u0435, \u043f\u043e\u0434\u043e\u0431\u0440\u0430\u0442\u044c \u0430\u043d\u0430\u043b\u043e\u0433\u0438. \u041d\u0430\u043f\u0440\u0438\u043c\u0435\u0440: \u00ab\u043d\u0430\u0439\u0434\u0438 \u043a\u0430\u0431\u0435\u043b\u044c 3\u00d72,5 \u043c\u043c\u00b2\u00bb \u0438\u043b\u0438 \u00ab\u043d\u0430\u0439\u0434\u0438 \u0442\u043e\u0432\u0430\u0440 \u043f\u043e \u0430\u0440\u0442\u0438\u043a\u0443\u00bb.",
+            [],
+        )
+    if normalized in _PRODUCT_CLARIFICATION_PHRASES:
+        return (
+            "\u0423\u0442\u043e\u0447\u043d\u0438\u0442\u0435 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u0435, \u0430\u0440\u0442\u0438\u043a\u0443\u043b \u0438\u043b\u0438 \u043d\u0443\u0436\u043d\u044b\u0435 \u0445\u0430\u0440\u0430\u043a\u0442\u0435\u0440\u0438\u0441\u0442\u0438\u043a\u0438 \u0442\u043e\u0432\u0430\u0440\u0430.",
+            [],
+        )
+    if normalized in _GREETING_WORDS:
+        return (
+            "\u0417\u0434\u0440\u0430\u0432\u0441\u0442\u0432\u0443\u0439\u0442\u0435! \u041f\u043e\u043c\u043e\u0433\u0443 \u043d\u0430\u0439\u0442\u0438 \u0442\u043e\u0432\u0430\u0440, \u043f\u0440\u043e\u0432\u0435\u0440\u0438\u0442\u044c \u043d\u0430\u043b\u0438\u0447\u0438\u0435 \u0438 \u043f\u043e\u0434\u043e\u0431\u0440\u0430\u0442\u044c \u0430\u043d\u0430\u043b\u043e\u0433. \u0427\u0442\u043e \u0438\u0449\u0435\u0442\u0435?",
+            [],
+        )
     knowledge_answer = answer_query(text)
     if knowledge_answer["status"] != "not_found":
         return sanitize_text(knowledge_answer["answer"]), []
