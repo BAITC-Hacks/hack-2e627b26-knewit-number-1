@@ -1,3 +1,4 @@
+from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, override_settings
@@ -173,6 +174,34 @@ class AvailabilityRuleTests(SimpleTestCase):
         self.assertEqual(result["status"], "unavailable")
         self.assertEqual(result["sellable_quantity"], 0)
 
+    def test_positive_stock_without_approved_allowlist_is_unknown(self):
+        result = calculate_availability(
+            [{"id": 13, "name": "Алматы", "quantity": 5}], 5, (), "ekt-unapproved-v1"
+        )
+        self.assertEqual(result["status"], "availability_unknown")
+        self.assertIsNone(result["sellable_quantity"])
+
+    def test_expired_snapshot_is_stale(self):
+        now = datetime(2026, 9, 23, 12, 0, tzinfo=timezone.utc)
+        result = calculate_availability(
+            [{"id": 1, "name": "Алматы", "quantity": 5}],
+            5,
+            (1,),
+            "v1",
+            observed_at=now - timedelta(seconds=301),
+            stale_after_seconds=300,
+            now=now,
+        )
+        self.assertEqual(result["status"], "stale")
+        self.assertIsNone(result["sellable_quantity"])
+
+    def test_cyrillic_service_store_is_excluded(self):
+        result = calculate_availability(
+            [{"id": 900, "name": "Брак", "quantity": 4}], 4, (900,), "v1"
+        )
+        self.assertEqual(result["status"], "unavailable")
+        self.assertEqual(result["sellable_quantity"], 0)
+
 
 class EktProviderTests(SimpleTestCase):
     def make_provider(self, base_url="https://ekt.kz/api"):
@@ -219,6 +248,20 @@ class EktProviderTests(SimpleTestCase):
             result = provider.get_product(515291)
         self.assertEqual(result["url_api_detail"], "/api/products/detail?id=515291")
         self.assertEqual(result["data_source"], "ekt")
+
+    def test_empty_offers_disable_automatic_add_and_require_confirmation(self):
+        provider = self.make_provider()
+        upstream = {
+            "id": 515291,
+            "offers": [],
+            "quantity": 3,
+            "stores": [{"id": 1, "name": "Алматы", "quantity": 3}],
+        }
+        with patch.object(EktCatalogProvider, "_request", return_value=upstream):
+            result = provider.get_product(515291)
+        self.assertFalse(result["cart_policy"]["automatic_add_allowed"])
+        self.assertTrue(result["cart_policy"]["requires_explicit_confirmation"])
+        self.assertFalse(result["cart_policy"]["offers_schema_supported"])
 
     @patch(
         "catalog.providers.ekt.socket.getaddrinfo",

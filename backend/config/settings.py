@@ -51,8 +51,19 @@ EKT_ASSET_ALLOWED_HOSTS = tuple(
 
 SELLABLE_STORE_IDS = tuple(
     int(value.strip())
-    for value in os.environ.get("SELLABLE_STORE_IDS", "1,2,3").split(",")
+    for value in os.environ.get("SELLABLE_STORE_IDS", "").split(",")
     if value.strip()
 )
-AVAILABILITY_RULE_VERSION = os.environ.get("AVAILABILITY_RULE_VERSION", "fixture-allowlist-v1")
+FIXTURE_SELLABLE_STORE_IDS = tuple(
+    int(value.strip())
+    for value in os.environ.get("FIXTURE_SELLABLE_STORE_IDS", "1,2,3").split(",")
+    if value.strip()
+)
+AVAILABILITY_RULE_VERSION = os.environ.get("AVAILABILITY_RULE_VERSION", "ekt-allowlist-unapproved-v1")
+FIXTURE_AVAILABILITY_RULE_VERSION = os.environ.get(
+    "FIXTURE_AVAILABILITY_RULE_VERSION", "fixture-allowlist-v1"
+)
+AVAILABILITY_STALE_AFTER_SECONDS = float(
+    os.environ.get("AVAILABILITY_STALE_AFTER_SECONDS", "300")
+)
 FIXTURE_TIMEOUT_SECONDS = float(os.environ.get("FIXTURE_TIMEOUT_SECONDS", "3.1"))

@@ -8,8 +8,8 @@ from catalog.providers.fixture import FixtureCatalogProvider
 def get_catalog_provider():
     if settings.CATALOG_PROVIDER == "fixture":
         return FixtureCatalogProvider(
-            sellable_store_ids=settings.SELLABLE_STORE_IDS,
-            availability_rule_version=settings.AVAILABILITY_RULE_VERSION,
+            sellable_store_ids=settings.FIXTURE_SELLABLE_STORE_IDS,
+            availability_rule_version=settings.FIXTURE_AVAILABILITY_RULE_VERSION,
             timeout_seconds=settings.FIXTURE_TIMEOUT_SECONDS,
         )
     if settings.CATALOG_PROVIDER == "ekt":
@@ -23,6 +23,7 @@ def get_catalog_provider():
             availability_rule_version=settings.AVAILABILITY_RULE_VERSION,
             asset_allowed_hosts=settings.EKT_ASSET_ALLOWED_HOSTS,
             deadline_seconds=settings.EKT_DEADLINE_SECONDS,
+            availability_stale_after_seconds=settings.AVAILABILITY_STALE_AFTER_SECONDS,
             max_retries=settings.EKT_MAX_RETRIES,
             retry_jitter_seconds=settings.EKT_RETRY_JITTER_SECONDS,
             max_response_bytes=settings.EKT_MAX_RESPONSE_BYTES,

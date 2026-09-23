@@ -33,10 +33,12 @@ The fixture dataset is deterministic: version `catalog-fixture-v1`, seed
 fixture response is marked with `data_source=fixture`; product links and images
 are local demo paths.
 
-Availability is calculated for both providers by the same conservative rule.
-Only IDs from `SELLABLE_STORE_IDS` (default: `1,2,3`) count as sellable stock.
-Known service warehouses such as `Брак` and `перемещение` never count. Positive
-stock at an unclassified warehouse produces `availability_unknown`.
+Availability is calculated for both providers by the same conservative,
+versioned rule. For live EKT data, `SELLABLE_STORE_IDS` is empty by default and
+must be approved by the product owner; positive stock without an approved
+allowlist produces `availability_unknown`. The fixture uses the separate
+`FIXTURE_SELLABLE_STORE_IDS` setting. Known service warehouses such as `Брак`
+and `перемещение` never count. An expired snapshot produces `stale`.
 
 Error/data fixtures are selected with either `fixture_case=...` or the
 `X-Fixture-Scenario` header:

@@ -9,6 +9,7 @@ import random
 import socket
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlencode
 from urllib.parse import urlsplit
@@ -30,6 +31,7 @@ class EktCatalogProvider:
     availability_rule_version: str
     asset_allowed_hosts: tuple[str, ...] = ("ekt.kz",)
     deadline_seconds: float = 5.0
+    availability_stale_after_seconds: float = 300.0
     max_retries: int = 2
     retry_jitter_seconds: float = 0.1
     max_response_bytes: int = 5_000_000
@@ -228,5 +230,12 @@ class EktCatalogProvider:
             payload.get("quantity"),
             self.sellable_store_ids,
             self.availability_rule_version,
+            observed_at=datetime.now(timezone.utc),
+            stale_after_seconds=self.availability_stale_after_seconds,
         )
+        payload["cart_policy"] = {
+            "automatic_add_allowed": False,
+            "requires_explicit_confirmation": True,
+            "offers_schema_supported": bool(payload.get("offers")),
+        }
         return payload
