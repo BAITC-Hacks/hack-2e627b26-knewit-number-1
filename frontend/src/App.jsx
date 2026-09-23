@@ -1266,6 +1266,8 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
             content: sanitizeAssistantText(response?.content, language),
             product: response?.product ?? response?.products?.[0],
             analogComparison: response?.analogComparison,
+            cartAction: response?.cart_proposal,
+            cartPhase: response?.cart_proposal ? "proposed" : undefined,
             time: getTimeLabel(language),
           },
         ]);

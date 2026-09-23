@@ -44,7 +44,7 @@ function jsonResponse(payload, status = 200) {
   }));
 }
 
-function installFetch(handler = () => jsonResponse({})) {
+function installFetch(handler = () => jsonResponse({}), dialogHandler) {
   vi.stubGlobal("fetch", vi.fn((url, options = {}) => {
     if (url === "/api/cart" && (!options.method || options.method === "GET")) {
       return jsonResponse({ version: 0, currency: "KZT", items: [], total: "0.00", url: "/demo/cart/" });
@@ -55,6 +55,8 @@ function installFetch(handler = () => jsonResponse({})) {
     if (String(url).startsWith("/api/products/detail")) return jsonResponse(PRODUCT);
     if (url === "/api/dialog/messages") {
       const request = JSON.parse(options.body || "{}");
+      const dialogPayload = dialogHandler?.(request);
+      if (dialogPayload) return jsonResponse(dialogPayload);
       return jsonResponse({
         dialog_id: "dialog-test",
         state: "done",
@@ -69,6 +71,21 @@ function installFetch(handler = () => jsonResponse({})) {
     }
     return handler(url, options);
   }));
+}
+
+function dialogProposalResponse(proposal) {
+  return {
+    dialog_id: "dialog-test",
+    state: "done",
+    message: {
+      id: "assistant-proposal-from-api",
+      role: "assistant",
+      state: "done",
+      content: "Подготовил предложение добавить 2 шт. выбранного товара. Подтвердите добавление явно.",
+      products: [PRODUCT],
+      cart_proposal: proposal,
+    },
+  };
 }
 
 async function openProductCard(user) {
@@ -125,6 +142,86 @@ describe("cart confirmation flow", () => {
     expect(fetch).toHaveBeenCalledWith(
       "/api/cart/actions/action-original/confirm",
       expect.objectContaining({ method: "POST", body: "{}" }),
+    );
+  });
+
+  it("renders a server-issued proposal from a text command and confirms its exact action", async () => {
+    const user = userEvent.setup();
+    const proposal = action({ action_id: "dialog-action" });
+    installFetch((url) => {
+      if (url === "/api/cart/actions/dialog-action/confirm") {
+        return jsonResponse({
+          action_id: "dialog-action",
+          status: "succeeded",
+          added_quantity: 2,
+          cart: {
+            version: 1,
+            currency: "KZT",
+            total: "1834.00",
+            url: "/demo/cart/",
+            items: [{ product_id: PRODUCT.id, quantity: 2, unit_price: "917.00", product: PRODUCT }],
+          },
+        });
+      }
+      return jsonResponse({ error: { code: "unexpected" } }, 500);
+    }, (request) => request.text === "добавь два" ? dialogProposalResponse(proposal) : null);
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    const input = screen.getByLabelText("Введите сообщение");
+    await user.type(input, "добавь два");
+    await user.keyboard("{Enter}");
+
+    const summary = await screen.findByLabelText("Резюме добавления в корзину");
+    expect(summary).toHaveAttribute("data-action-id", "dialog-action");
+    expect(within(summary).getByText("2 шт.")).toBeInTheDocument();
+    expect(fetch.mock.calls.filter(([url]) => url === "/api/cart/actions")).toHaveLength(0);
+
+    await user.click(within(summary).getByRole("button", { name: "Подтвердить и добавить" }));
+
+    expect(await screen.findByText("Добавлено: 2 шт.")).toBeInTheDocument();
+    expect(screen.getByRole("link", { name: /Открыть корзину, товаров: 2/ })).toHaveAttribute("href", "/demo/cart/");
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/cart/actions/dialog-action/confirm",
+      expect.objectContaining({ method: "POST", body: "{}" }),
+    );
+  });
+
+  it("confirms a server-issued proposal when the user explicitly replies yes", async () => {
+    const user = userEvent.setup();
+    const proposal = action({ action_id: "dialog-text-action" });
+    installFetch((url) => {
+      if (url === "/api/cart/actions/confirm-text") {
+        return jsonResponse({
+          action_id: "dialog-text-action",
+          status: "succeeded",
+          added_quantity: 2,
+          cart: {
+            version: 1,
+            currency: "KZT",
+            total: "1834.00",
+            url: "/demo/cart/",
+            items: [{ product_id: PRODUCT.id, quantity: 2, unit_price: "917.00", product: PRODUCT }],
+          },
+        });
+      }
+      return jsonResponse({ error: { code: "unexpected" } }, 500);
+    }, (request) => request.text === "добавь два" ? dialogProposalResponse(proposal) : null);
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    const input = screen.getByLabelText("Введите сообщение");
+    await user.type(input, "добавь два");
+    await user.keyboard("{Enter}");
+    await screen.findByLabelText("Резюме добавления в корзину");
+
+    await user.type(input, "да");
+    await user.keyboard("{Enter}");
+
+    expect(await screen.findByText("Добавлено: 2 шт.")).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith(
+      "/api/cart/actions/confirm-text",
+      expect.objectContaining({ method: "POST", body: expect.stringContaining('"text":"да"') }),
     );
   });
 
