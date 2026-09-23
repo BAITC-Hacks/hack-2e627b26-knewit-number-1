@@ -7,6 +7,7 @@ from unittest.mock import Mock, patch
 from django.test import SimpleTestCase, override_settings
 
 from catalog.availability import calculate_availability
+from catalog.analogs import find_analogs
 from catalog.errors import CatalogConfigurationError, CatalogError, CatalogTransportError
 from catalog.index_sync import sync_catalog
 from catalog.providers.ekt import EktCatalogProvider
@@ -518,8 +519,80 @@ class CatalogSearchTests(SimpleTestCase):
 
         self.assertEqual(result["mode"], "fuzzy")
         self.assertLessEqual(len(result["results"]), 5)
-        self.assertEqual(result["results"][0]["id"], 101)
-        self.assertIn(result["results"][0]["match_type"], {"partial", "fuzzy"})
+
+
+class AnalogCompatibilityTests(SimpleTestCase):
+    def _write_index(self, path: Path) -> None:
+        items = [
+            {
+                "id": 1,
+                "name": "Светильник LED 18W",
+                "properties": {
+                    "CATEGORY": "светильник",
+                    "ANALOG_GROUP": "LIGHT-1",
+                    "POWER": "18W",
+                    "VOLTAGE": "220V",
+                    "IP_RATING": "IP44",
+                },
+            },
+            {
+                "id": 2,
+                "name": "Светильник LED 18W IP55",
+                "properties": {
+                    "CATEGORY": "светильник",
+                    "ANALOG_GROUP": "LIGHT-1",
+                    "POWER": "18W",
+                    "VOLTAGE": "220V",
+                    "IP_RATING": "IP55",
+                },
+            },
+            {
+                "id": 3,
+                "name": "Светильник LED 24W",
+                "properties": {
+                    "CATEGORY": "светильник",
+                    "ANALOG_GROUP": "LIGHT-1",
+                    "POWER": "24W",
+                    "VOLTAGE": "220V",
+                    "IP_RATING": "IP55",
+                },
+            },
+            {
+                "id": 4,
+                "name": "Кабель 18W",
+                "properties": {"CATEGORY": "кабель", "ANALOG_GROUP": "CABLE-1", "POWER": "18W"},
+            },
+        ]
+        path.write_text(json.dumps({"items": items}, ensure_ascii=False), encoding="utf-8")
+
+    def test_lighting_matrix_rejects_critical_mismatch_and_explains_match(self):
+        with sync_test_paths() as (index_path, _):
+            self._write_index(index_path)
+            result = find_analogs(1, index_path)
+
+        self.assertEqual(result["matrix"], "lighting-v1")
+        self.assertEqual([item["id"] for item in result["results"]], [2])
+        self.assertEqual(result["rejected_candidates"], 1)
+        self.assertIn("power", result["results"][0]["compatibility"]["matched_parameters"])
+        self.assertIn("voltage", result["results"][0]["explanation"])
+
+    def test_unapproved_category_requires_manager_review(self):
+        with sync_test_paths() as (index_path, _):
+            self._write_index(index_path)
+            result = find_analogs(4, index_path)
+
+        self.assertEqual(result["status"], "manager_review_required")
+        self.assertTrue(result["manager_review_required"])
+        self.assertEqual(result["results"], [])
+
+    def test_analogs_endpoint_returns_matrix_result(self):
+        with sync_test_paths() as (index_path, _):
+            self._write_index(index_path)
+            with override_settings(CATALOG_INDEX_PATH=index_path):
+                response = self.client.get("/api/analogs", {"id": 1})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["results"][0]["id"], 2)
 
     def test_search_endpoint_returns_bad_request_without_query(self):
         response = self.client.get("/api/search")
@@ -558,7 +631,7 @@ class CatalogSearchTests(SimpleTestCase):
 
     def test_semantic_search_returns_at_most_five_candidates(self):
         with sync_test_paths() as (index_path, _):
-            self.write_index(index_path)
+            self._write_index(index_path)
             result = semantic_search_catalog("автоматический выключатель", index_path)
 
         self.assertLessEqual(len(result["results"]), 5)

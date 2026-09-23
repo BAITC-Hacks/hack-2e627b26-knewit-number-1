@@ -10,9 +10,10 @@ from django.http import FileResponse, HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_GET
 
 from catalog.errors import CatalogError
+from catalog.analogs import find_analogs
+from catalog.search import SearchIndexError, search_catalog, semantic_search_catalog
 from config.observability import add_stage, record_metric
 from catalog.providers import get_catalog_provider
-from catalog.search import SearchIndexError, search_catalog, semantic_search_catalog
 from catalog.providers.fixture import (
     FIXTURE_DATASET_VERSION,
     FIXTURE_PRODUCT_COUNT,
@@ -121,6 +122,28 @@ def semantic_search(request: HttpRequest) -> JsonResponse:
     finally:
         add_stage("semantic_search", started)
     record_metric("semantic_search_success_total" if result["results"] else "semantic_search_empty_total")
+    return JsonResponse(result)
+
+
+@require_GET
+def analogs(request: HttpRequest) -> JsonResponse:
+    raw_product_id = request.GET.get("id")
+    try:
+        product_id = int(raw_product_id or "0")
+        if product_id < 1:
+            raise ValueError
+        started = time.perf_counter()
+        try:
+            result = find_analogs(product_id, settings.CATALOG_INDEX_PATH, settings.CATALOG_SEARCH_MAX_RESULTS)
+        finally:
+            add_stage("analog_compatibility", started)
+    except ValueError:
+        return JsonResponse({"error": {"code": "invalid_product_id", "message": "id must be a positive integer"}}, status=400)
+    except KeyError:
+        return JsonResponse({"error": {"code": "product_not_found", "message": "Product was not found in the local index"}}, status=404)
+    except SearchIndexError as exc:
+        return JsonResponse({"error": {"code": "search_index_unavailable", "message": str(exc)}}, status=503)
+    record_metric("analogs_success_total" if result["results"] else "analogs_empty_total")
     return JsonResponse(result)
 
 

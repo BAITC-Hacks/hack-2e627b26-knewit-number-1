@@ -22,6 +22,7 @@ Routes:
 - `GET /api/search?q=автоматический выключатл`
 - `GET /api/search/semantic?q=автоматический выключатель 16А`
 - `GET /api/cart`
+- `GET /api/analogs?id=900001`
 - `POST /api/cart/actions`
 - `POST /api/cart/actions/{action_id}/confirm`
 - `POST /api/cart/actions/confirm-text`
@@ -81,6 +82,13 @@ as one `exact` top-1 result. Other queries use case-insensitive partial/fuzzy
 matching against product names and return no more than five `fuzzy` candidates.
 If the index has not been synchronized yet, the endpoint returns HTTP 503 with
 `search_index_unavailable`.
+
+`GET /api/analogs?id=...` applies the approved `lighting-v1` compatibility
+matrix for lighting products. It checks purpose, mounting, power, voltage,
+color temperature, luminous flux, IP rating and dimensions when those fields
+are present. A critical mismatch excludes a candidate; missing values are
+reported as unverified in the explanation. Categories without an approved
+matrix return `manager_review_required` and do not produce automatic analogs.
 
 `GET /api/search/semantic?q=...` additionally reads `description` and
 `properties` from an index built with `--include-details`. It separates required
