@@ -2035,6 +2035,13 @@ function SitePreview({ cart, shopCartItems, language, onLanguageRequest, onOpenC
 
   return (
     <main className="site-preview">
+      <div className="site-utility" role="status">
+        <div className="site-utility-inner">
+          <span className="site-utility-location"><span className="utility-dot" /> Алматы</span>
+          <span className="site-utility-message">Электротехника для дома, бизнеса и производства</span>
+          <a href="#contacts">Помощь и контакты</a>
+        </div>
+      </div>
       <nav className="site-nav">
         <a className="brand" href="#top" aria-label={copy.brand}>
           <span className="brand-mark">E</span>
@@ -2044,6 +2051,7 @@ function SitePreview({ cart, shopCartItems, language, onLanguageRequest, onOpenC
           <a href="#catalog">{copy.catalog}</a>
           <a href="#delivery">{copy.delivery}</a>
           <a href="#contacts">{copy.contacts}</a>
+          <a href="#about">О компании</a>
         </div>
         <div className="site-nav-actions">
           <div className="site-language-switcher" aria-label={copy.languageSwitcher}>
@@ -2080,7 +2088,20 @@ function SitePreview({ cart, shopCartItems, language, onLanguageRequest, onOpenC
         </div>
       </section>
 
-      <section className="site-footer-strip" id="delivery"><span>{copy.footer}</span><span>·</span><span id="contacts">{copy.cities}</span></section>
+      <footer className="site-footer" id="delivery">
+        <div className="site-footer-main">
+          <div className="site-footer-brand" id="about">
+            <a className="brand brand--footer" href="#top" aria-label={copy.brand}><span className="brand-mark">E</span><span>EKT<span className="brand-dot">.</span>kz</span></a>
+            <p>{copy.description}</p>
+            <a className="footer-phone" href="tel:+77273468888">+7 (727) 346-88-88</a>
+            <span className="footer-hours">Пн–Пт · 09:00–18:00</span>
+          </div>
+          <div className="site-footer-column"><h3>Покупателям</h3><a href="#catalog">Каталог</a><a href="#delivery">Доставка и оплата</a><a href="#contacts">Возврат и обмен</a><a href="#contacts">Частые вопросы</a></div>
+          <div className="site-footer-column"><h3>Компания</h3><a href="#about">О компании</a><a href="#about">Новости</a><a href="#contacts">Контакты</a><a href="#contacts">Сотрудничество</a></div>
+          <div className="site-footer-contact" id="contacts"><span className="footer-kicker">Нужна консультация?</span><strong>{copy.footer}</strong><p>{copy.cities}</p><button type="button" onClick={onOpenChat}>Спросить консультанта <span>↗</span></button></div>
+        </div>
+        <div className="site-footer-bottom"><span>© 2026 EKT.kz</span><span>Электротехника, которой доверяют</span><a href="#top">Политика конфиденциальности</a></div>
+      </footer>
     </main>
   );
 }

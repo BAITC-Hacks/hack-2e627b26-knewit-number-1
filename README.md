@@ -218,3 +218,97 @@ python manage.py test
 ## Что нужно для production
 
 Перед реальным запуском необходимо: подключить production-БД с блокировками строк для корзины, вынести rate limit и сессии в общую инфраструктуру, настроить секрет-хранилище, добавить мониторинг/алерты, согласовать продаваемые склады, завершить endpoint безопасной загрузки файлов и получить официальный контракт на mutation API корзины EKT.
+
+## Local installation and `.env` configuration
+
+### Requirements
+
+- Python 3.12+;
+- Node.js 20+ and npm;
+- access to `https://ekt.kz/api` for the live catalog.
+
+### Backend (Windows PowerShell)
+
+```powershell
+cd backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+python -m pip install -r requirements.txt
+Copy-Item .env.example .env
+python manage.py migrate
+python manage.py check
+python manage.py runserver 127.0.0.1:8000
+```
+
+If PowerShell blocks `Activate.ps1`, use `.\.venv\Scripts\python.exe` directly. If port `8000` is busy, use `8001` and set the same port in `frontend/.env`.
+
+### `backend/.env`
+
+Create it by copying `backend/.env.example`. Use one `NAME=VALUE` pair per line, with no spaces around `=`.
+
+Demo mode:
+
+```dotenv
+CATALOG_PROVIDER=fixture
+DJANGO_ENV=development
+DJANGO_DEBUG=true
+DJANGO_SECRET_KEY=local-development-secret
+DJANGO_ALLOWED_HOSTS=localhost,127.0.0.1
+OPENAI_ENABLED=false
+```
+
+Live EKT mode:
+
+```dotenv
+CATALOG_PROVIDER=ekt
+EKT_API_BASE_URL=https://ekt.kz/api
+EKT_API_USERNAME=<EKT API username>
+EKT_API_PASSWORD=<EKT API password>
+SELLABLE_STORE_IDS=
+EKT_CONNECT_TIMEOUT_SECONDS=1
+EKT_READ_TIMEOUT_SECONDS=3
+EKT_DEADLINE_SECONDS=5
+EKT_MAX_RETRIES=2
+EKT_ASSET_ALLOWED_HOSTS=ekt.kz
+```
+
+`SELLABLE_STORE_IDS` may stay empty until EKT confirms sellable warehouses. It does not disable catalog loading; it only prevents stock from being treated as confirmed sellable.
+
+Optional OpenAI:
+
+```dotenv
+OPENAI_ENABLED=true
+OPENAI_API_KEY=<new OpenAI key>
+OPENAI_API_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=<available model>
+```
+
+Keep credentials only in backend `.env`; never commit them or put them in frontend. Revoke any key exposed in chat or git. `.env` files are ignored by `.gitignore`.
+
+### Frontend
+
+```powershell
+cd frontend
+Copy-Item .env.example .env
+npm.cmd install
+npm.cmd run dev
+```
+
+Set `frontend/.env` to the backend URL:
+
+```dotenv
+VITE_API_BASE_URL=http://127.0.0.1:8000
+```
+
+Use `http://127.0.0.1:8001` when backend runs on port 8001. Restart Vite after changing `.env`; the UI is usually at `http://localhost:5173`.
+
+### Verification
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:8000/ready
+Invoke-WebRequest "http://127.0.0.1:8000/api/products?page=1&per_page=2"
+cd frontend
+npm.cmd run test:run
+npm.cmd run build
+```
