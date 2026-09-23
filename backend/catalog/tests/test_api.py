@@ -538,6 +538,8 @@ class AnalogCompatibilityTests(SimpleTestCase):
             {
                 "id": 2,
                 "name": "Светильник LED 18W IP55",
+                "quantity": 5,
+                "stores": [{"id": 1, "name": "Алматы", "quantity": 5}],
                 "properties": {
                     "CATEGORY": "светильник",
                     "ANALOG_GROUP": "LIGHT-1",
@@ -549,6 +551,8 @@ class AnalogCompatibilityTests(SimpleTestCase):
             {
                 "id": 3,
                 "name": "Светильник LED 24W",
+                "quantity": 5,
+                "stores": [{"id": 1, "name": "Алматы", "quantity": 5}],
                 "properties": {
                     "CATEGORY": "светильник",
                     "ANALOG_GROUP": "LIGHT-1",
@@ -561,6 +565,19 @@ class AnalogCompatibilityTests(SimpleTestCase):
                 "id": 4,
                 "name": "Кабель 18W",
                 "properties": {"CATEGORY": "кабель", "ANALOG_GROUP": "CABLE-1", "POWER": "18W"},
+            },
+            {
+                "id": 5,
+                "name": "Светильник LED 18W без sellable остатка",
+                "quantity": 5,
+                "stores": [{"id": 900, "name": "Брак", "quantity": 5}],
+                "properties": {
+                    "CATEGORY": "светильник",
+                    "ANALOG_GROUP": "LIGHT-1",
+                    "POWER": "18W",
+                    "VOLTAGE": "220V",
+                    "IP_RATING": "IP55",
+                },
             },
         ]
         path.write_text(json.dumps({"items": items}, ensure_ascii=False), encoding="utf-8")
@@ -575,6 +592,10 @@ class AnalogCompatibilityTests(SimpleTestCase):
         self.assertEqual(result["rejected_candidates"], 1)
         self.assertIn("power", result["results"][0]["compatibility"]["matched_parameters"])
         self.assertIn("voltage", result["results"][0]["explanation"])
+        self.assertEqual(result["results"][0]["sellable_quantity"], 5)
+        self.assertIn("ranking", result["results"][0])
+        self.assertEqual(result["results"][0]["match_type"], "compatible_analog")
+        self.assertEqual(result["results"][0]["comparison"]["differences"][0]["parameter"], "ip_rating")
 
     def test_unapproved_category_requires_manager_review(self):
         with sync_test_paths() as (index_path, _):

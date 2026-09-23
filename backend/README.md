@@ -89,6 +89,10 @@ color temperature, luminous flux, IP rating and dimensions when those fields
 are present. A critical mismatch excludes a candidate; missing values are
 reported as unverified in the explanation. Categories without an approved
 matrix return `manager_review_required` and do not produce automatic analogs.
+Candidates with `sellable_quantity <= 0`, unknown availability or stale stock
+are excluded. Remaining candidates are ranked by parameter similarity,
+availability and price, and include `ranking`, `comparison` (matched values and
+material differences), `sellable_quantity` and a recommendation label.
 
 `GET /api/search/semantic?q=...` additionally reads `description` and
 `properties` from an index built with `--include-details`. It separates required
