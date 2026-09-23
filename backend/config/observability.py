@@ -197,6 +197,9 @@ def metrics_payload() -> dict[str, Any]:
 def readiness_payload() -> tuple[dict[str, Any], int]:
     provider = settings.CATALOG_PROVIDER
     provider_configured = provider != "ekt" or bool(settings.EKT_API_USERNAME and settings.EKT_API_PASSWORD)
+    llm_configured = bool(
+        settings.OPENAI_ENABLED and settings.OPENAI_API_KEY and settings.OPENAI_MODEL
+    )
     index_ready = Path(settings.CATALOG_INDEX_PATH).exists()
     ready = provider_configured and index_ready
     return {
@@ -204,6 +207,8 @@ def readiness_payload() -> tuple[dict[str, Any], int]:
         "checks": {
             "provider_configured": provider_configured,
             "catalog_index": index_ready,
+            # LLM is optional: false means the deterministic RAG path is used.
+            "llm_configured": llm_configured,
         },
         "catalog_provider": provider,
     }, (200 if ready else 503)

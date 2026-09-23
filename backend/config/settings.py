@@ -1,10 +1,21 @@
 import os
+import sys
 from pathlib import Path
 
 from django.core.exceptions import ImproperlyConfigured
 
+from config.env import load_env_file
+
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+# Tests must not accidentally consume developer secrets or target live APIs.
+# CI can still provide explicit environment variables when a test needs them.
+RUNNING_TESTS = any(
+    argument == "test" or argument.endswith(("pytest", "pytest.exe"))
+    for argument in sys.argv
+)
+if not RUNNING_TESTS:
+    load_env_file(BASE_DIR / ".env")
 
 DJANGO_ENV = os.environ.get("DJANGO_ENV", "development").strip().lower()
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "")
@@ -130,6 +141,49 @@ CATALOG_SYNC_PER_PAGE = int(os.environ.get("CATALOG_SYNC_PER_PAGE", "100"))
 CATALOG_SYNC_INTERVAL_HOURS = float(os.environ.get("CATALOG_SYNC_INTERVAL_HOURS", "24"))
 CATALOG_SYNC_INCLUDE_DETAILS = os.environ.get("CATALOG_SYNC_INCLUDE_DETAILS", "false").lower() in {"1", "true", "yes"}
 CATALOG_SEARCH_MAX_RESULTS = max(1, int(os.environ.get("CATALOG_SEARCH_MAX_RESULTS", "5")))
-PROMPT_VERSION = os.environ.get("PROMPT_VERSION", "not_configured")
-MODEL_VERSION = os.environ.get("MODEL_VERSION", "not_configured")
+
+# OpenAI is an optional server-side capability. The deterministic catalog/KB
+# path remains available when it is disabled or temporarily unavailable.
+OPENAI_ENABLED = os.environ.get("OPENAI_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "").strip()
+OPENAI_API_BASE_URL = os.environ.get(
+    "OPENAI_API_BASE_URL", "https://api.openai.com/v1"
+).strip().rstrip("/")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "gpt-6-astra").strip()
+OPENAI_CONNECT_TIMEOUT_SECONDS = max(
+    0.1, float(os.environ.get("OPENAI_CONNECT_TIMEOUT_SECONDS", "1"))
+)
+OPENAI_READ_TIMEOUT_SECONDS = max(
+    0.1, float(os.environ.get("OPENAI_READ_TIMEOUT_SECONDS", "12"))
+)
+OPENAI_DEADLINE_SECONDS = max(
+    1.0, float(os.environ.get("OPENAI_DEADLINE_SECONDS", "20"))
+)
+OPENAI_MAX_RETRIES = min(2, max(0, int(os.environ.get("OPENAI_MAX_RETRIES", "2"))))
+OPENAI_RETRY_JITTER_SECONDS = max(
+    0.0, float(os.environ.get("OPENAI_RETRY_JITTER_SECONDS", "0.15"))
+)
+OPENAI_MAX_OUTPUT_TOKENS = min(
+    4000, max(128, int(os.environ.get("OPENAI_MAX_OUTPUT_TOKENS", "900")))
+)
+OPENAI_MAX_TOOL_ROUNDS = min(
+    4, max(1, int(os.environ.get("OPENAI_MAX_TOOL_ROUNDS", "3")))
+)
+OPENAI_MAX_TOOL_CALLS_PER_ROUND = min(
+    8, max(1, int(os.environ.get("OPENAI_MAX_TOOL_CALLS_PER_ROUND", "5")))
+)
+OPENAI_MAX_CONTEXT_CHARS = min(
+    30000, max(2000, int(os.environ.get("OPENAI_MAX_CONTEXT_CHARS", "12000")))
+)
+OPENAI_MAX_TOOL_OUTPUT_CHARS = min(
+    200000, max(4000, int(os.environ.get("OPENAI_MAX_TOOL_OUTPUT_CHARS", "60000")))
+)
+OPENAI_MAX_RESPONSE_BYTES = min(
+    5000000, max(65536, int(os.environ.get("OPENAI_MAX_RESPONSE_BYTES", "1000000")))
+)
+
+PROMPT_VERSION = os.environ.get("PROMPT_VERSION", "dialog-rag-v1")
+MODEL_VERSION = os.environ.get(
+    "MODEL_VERSION", OPENAI_MODEL if OPENAI_ENABLED else "deterministic-rag-v1"
+)
 CATALOG_INDEX_VERSION = os.environ.get("CATALOG_INDEX_VERSION", "catalog-index-v1")

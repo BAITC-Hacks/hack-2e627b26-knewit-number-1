@@ -188,8 +188,51 @@ async function requestDemoAnswer(prompt, signal, language = DEFAULT_LANGUAGE) {
       reject(error);
     }, { once: true });
   });
-
   return createAssistantResponse(prompt, signal, language);
+}
+
+function csrfToken() {
+  const prefix = "csrftoken=";
+  const cookie = document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith(prefix));
+  return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : "";
+}
+
+async function requestAssistantAnswer(prompt, dialogId, signal, language = DEFAULT_LANGUAGE) {
+  const response = await fetch("/api/dialog/messages", {
+    method: "POST",
+    credentials: "same-origin",
+    signal,
+    headers: {
+      "Content-Type": "application/json",
+      ...(csrfToken() ? { "X-CSRFToken": csrfToken() } : {}),
+    },
+    body: JSON.stringify({ text: prompt, ...(dialogId ? { dialog_id: dialogId } : {}) }),
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = new Error(payload?.error?.message || safeErrorMessage(language));
+    error.code = payload?.error?.code;
+    throw error;
+  }
+  return payload;
+}
+
+async function requestDialogState(signal) {
+  const response = await fetch("/api/dialog", { credentials: "same-origin", signal });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload?.dialog_id) throw new Error("dialog_state_unavailable");
+  return payload;
+}
+
+async function clearServerDialog() {
+  const response = await fetch("/api/dialog/history", {
+    method: "DELETE",
+    credentials: "same-origin",
+    headers: csrfToken() ? { "X-CSRFToken": csrfToken() } : {},
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload?.dialog_id) throw new Error("dialog_clear_unavailable");
+  return payload;
 }
 
 function Icon({ name, size = 18 }) {
@@ -784,7 +827,7 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
   const openFocusTimerRef = useRef(null);
   const pendingRef = useRef(null);
   const cartLockRef = useRef(false);
-  const dialogIdRef = useRef(createId("dialog"));
+  const dialogIdRef = useRef("");
   const messageVersionRef = useRef(0);
   const proposalRetryRef = useRef(new Map());
   const languageInitializedRef = useRef(false);
@@ -801,14 +844,23 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
   }, []);
 
   useEffect(() => {
+    let active = true;
     if (isOpen) {
       openFocusTimerRef.current = window.setTimeout(() => {
         openFocusTimerRef.current = null;
         inputRef.current?.focus();
       }, 120);
+      if (!dialogIdRef.current) {
+        void requestDialogState().then((dialog) => {
+          if (active) dialogIdRef.current = dialog.dialog_id;
+        }).catch(() => {
+          // The first POST can still establish a dialog; surface only an actual send failure.
+        });
+      }
     }
 
     return () => {
+      active = false;
       if (openFocusTimerRef.current) window.clearTimeout(openFocusTimerRef.current);
       openFocusTimerRef.current = null;
     };
@@ -1198,10 +1250,11 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
     const statusTimer = window.setTimeout(() => setPhase("processing"), 280);
     pendingRef.current = { controller, statusTimer };
     setPhase("submitting");
-    requestDemoAnswer(prompt, controller.signal, language)
+    requestAssistantAnswer(prompt, dialogIdRef.current, controller.signal, language)
       .then((answer) => {
         if (controller.signal.aborted) return;
-        const response = typeof answer === "string" ? { content: answer } : answer;
+        const response = answer?.message ?? {};
+        dialogIdRef.current = answer?.dialog_id ?? dialogIdRef.current;
         pendingRef.current = null;
         window.clearTimeout(statusTimer);
         setPhase("idle");
@@ -1211,7 +1264,7 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
             id: createId("assistant"),
             role: "assistant",
             content: sanitizeAssistantText(response?.content, language),
-            product: response?.product,
+            product: response?.product ?? response?.products?.[0],
             analogComparison: response?.analogComparison,
             time: getTimeLabel(language),
           },
@@ -1243,10 +1296,15 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
     setPhase("idle");
     setCartRequest(null);
     cartLockRef.current = false;
-    dialogIdRef.current = createId("dialog");
+    dialogIdRef.current = "";
     messageVersionRef.current = 0;
     proposalRetryRef.current.clear();
     setIsClearDialogOpen(false);
+    void clearServerDialog().then((dialog) => {
+      dialogIdRef.current = dialog.dialog_id;
+    }).catch(() => {
+      // A later message without an ID safely creates or resumes a server dialog.
+    });
     requestAnimationFrame(() => inputRef.current?.focus());
   }, [cancelGeneration, language]);
 

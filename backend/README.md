@@ -27,6 +27,7 @@ Routes:
 - `GET /api/session`
 - `GET /api/dialog`
 - `POST /api/dialog/messages`
+- `POST /api/dialog/messages/stream` (SSE)
 - `POST /api/dialog/messages/{message_id}/retry`
 - `POST /api/dialog/cancel`
 - `DELETE /api/dialog/history`
@@ -133,6 +134,15 @@ catalog results. A cart proposal may be returned, but the cart is not mutated
 until the existing explicit confirmation endpoint is called. `POST
 /api/dialog/cancel` marks the current operation cancelled; `DELETE
 /api/dialog/history` starts a fresh dialog without touching other session data.
+
+When `OPENAI_ENABLED=true` and a server-side `OPENAI_API_KEY` is configured,
+the dialog uses the Responses API as a bounded planner over four strict RAG
+tools. Price and availability are rendered only from a live catalog-detail
+tool result; the model cannot issue arbitrary HTTP or mutate the cart. The SSE
+route emits an immediate progress token and then the source-backed final
+message. If OpenAI fails, the deterministic catalog/knowledge path remains
+available. Configuration, response provenance, limits, and verification are
+documented in [docs/llm-orchestrator.md](docs/llm-orchestrator.md).
 
 ## Knowledge base
 
