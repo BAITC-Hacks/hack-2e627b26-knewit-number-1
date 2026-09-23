@@ -20,6 +20,7 @@ Routes:
 - `GET /api/products?page=1&per_page=20`
 - `GET /api/products/detail?id=900001`
 - `GET /api/search?q=автоматический выключатл`
+- `GET /api/search/semantic?q=автоматический выключатель 16А`
 - `GET /api/cart`
 - `POST /api/cart/actions`
 - `POST /api/cart/actions/{action_id}/confirm`
@@ -39,7 +40,7 @@ Build or refresh the local ID-deduplicated index with:
 
 ```bash
 cd backend
-python manage.py sync_catalog
+python manage.py sync_catalog --include-details
 ```
 
 The command walks pages until an empty page or a repeated page-ID signature.
@@ -67,6 +68,12 @@ as one `exact` top-1 result. Other queries use case-insensitive partial/fuzzy
 matching against product names and return no more than five `fuzzy` candidates.
 If the index has not been synchronized yet, the endpoint returns HTTP 503 with
 `search_index_unavailable`.
+
+`GET /api/search/semantic?q=...` additionally reads `description` and
+`properties` from an index built with `--include-details`. It separates required
+and desired parameters, returns at most five candidates and explains matched or
+unconfirmed parameters. Without detail enrichment, semantic results can only
+use the list fields that are present in the index.
 
 ## Fixture data
 

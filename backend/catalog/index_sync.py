@@ -78,6 +78,7 @@ def sync_catalog(
     status_path: Path,
     max_pages: int,
     per_page: int,
+    include_details: bool = False,
 ) -> SyncResult:
     """Build a complete, ID-deduplicated catalog index from a provider.
 
@@ -154,11 +155,35 @@ def sync_catalog(
         _write_status(status_path, result, _read_status(status_path))
         return result
 
+    if include_details:
+        for product_id, item in products_by_id.items():
+            try:
+                detail = provider.get_product(product_id)
+            except CatalogError as exc:
+                errors += 1
+                warning = f"catalog detail {product_id} failed: {exc.code}"
+                logger.exception("Catalog detail enrichment failed for product %s", product_id)
+                result = SyncResult(False, "detail_provider_error", pages_fetched, len(products_by_id), errors, time.monotonic() - started, warning, synced_at)
+                _write_status(status_path, result, _read_status(status_path))
+                return result
+            except Exception:
+                errors += 1
+                warning = f"catalog detail {product_id} failed with an unexpected error"
+                logger.exception("Catalog detail enrichment failed for product %s", product_id)
+                result = SyncResult(False, "detail_provider_error", pages_fetched, len(products_by_id), errors, time.monotonic() - started, warning, synced_at)
+                _write_status(status_path, result, _read_status(status_path))
+                return result
+            if isinstance(detail, dict):
+                for field in ("description", "quantity", "stores", "properties", "offers"):
+                    if field in detail:
+                        item[field] = deepcopy(detail[field])
+
     ordered_items = [products_by_id[product_id] for product_id in sorted(products_by_id)]
     index_payload = {
         "data_source": provider.data_source,
         "synced_at": synced_at,
         "stop_reason": stop_reason,
+        "include_details": include_details,
         "pages": pages_fetched,
         "count": len(ordered_items),
         "items": ordered_items,

@@ -11,7 +11,7 @@ from catalog.errors import CatalogConfigurationError, CatalogError, CatalogTrans
 from catalog.index_sync import sync_catalog
 from catalog.providers.ekt import EktCatalogProvider
 from catalog.providers.fixture import FIXTURE_DATASET_VERSION, FIXTURE_SEED, FixtureCatalogProvider
-from catalog.search import clear_index_cache, search_catalog
+from catalog.search import clear_index_cache, search_catalog, semantic_search_catalog
 
 
 @contextmanager
@@ -415,6 +415,36 @@ class CatalogIndexSyncTests(SimpleTestCase):
             self.assertEqual(initial.stop_reason, "max_pages_guard")
             self.assertFalse(index_path.exists())
 
+    def test_include_details_enriches_index_for_semantic_search(self):
+        class DetailProvider:
+            data_source = "fixture"
+
+            def list_products(self, page, per_page):
+                del per_page
+                return {"items": [{"id": 1, "name": "Автомат"}]} if page == 1 else {"items": []}
+
+            def get_product(self, product_id):
+                return {
+                    "id": product_id,
+                    "description": "Защита цепи",
+                    "properties": {"NOMINAL_CURRENT": "16А"},
+                }
+
+        with sync_test_paths() as (index_path, status_path):
+            result = sync_catalog(
+                DetailProvider(),
+                index_path,
+                status_path,
+                max_pages=5,
+                per_page=20,
+                include_details=True,
+            )
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(result.success)
+        self.assertTrue(payload["include_details"])
+        self.assertEqual(payload["items"][0]["properties"]["NOMINAL_CURRENT"], "16А")
+
 
 class CatalogSearchTests(SimpleTestCase):
     def setUp(self):
@@ -464,3 +494,40 @@ class CatalogSearchTests(SimpleTestCase):
         response = self.client.get("/api/search")
         self.assertEqual(response.status_code, 400)
         self.assertEqual(response.json()["error"]["code"], "invalid_query")
+
+    def test_semantic_search_separates_required_and_desired_parameters(self):
+        with sync_test_paths() as (index_path, _):
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "id": 201,
+                                "name": "Автоматический выключатель",
+                                "properties": {"NOMINAL_CURRENT": "16А", "POLES": "3"},
+                            },
+                            {
+                                "id": 202,
+                                "name": "Автоматический выключатель",
+                                "properties": {"NOMINAL_CURRENT": "25А", "POLES": "1"},
+                            },
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            result = semantic_search_catalog("нужен автомат 16А, желательно 3 полюса", index_path)
+
+        self.assertEqual(result["mode"], "semantic")
+        self.assertIn("16а", result["parsed"]["required"])
+        self.assertIn("3", result["parsed"]["desired"])
+        self.assertEqual(result["results"][0]["id"], 201)
+        self.assertIn("обязательные параметры", result["results"][0]["explanation"])
+
+    def test_semantic_search_returns_at_most_five_candidates(self):
+        with sync_test_paths() as (index_path, _):
+            self.write_index(index_path)
+            result = semantic_search_catalog("автоматический выключатель", index_path)
+
+        self.assertLessEqual(len(result["results"]), 5)

@@ -17,6 +17,14 @@ _cache_lock = threading.Lock()
 _cache_key: tuple[str, int, int] | None = None
 _cache_items: tuple[dict[str, Any], ...] = ()
 _word_pattern = re.compile(r"[\w]+", re.UNICODE)
+_number_unit_pattern = re.compile(r"\d+(?:[.,]\d+)?\s*(?:а|a|в|v|ка|кa|квт|kw|вт|w|ма|мм|м|гц|hz|ip\s*\d+)", re.IGNORECASE)
+_stop_words = {
+    "и", "или", "для", "на", "с", "со", "по", "в", "во", "из", "от", "до", "не",
+    "нужен", "нужна", "нужно", "требуется", "ищу", "подберите", "товар", "товары",
+    "обязательно", "желательно", "желательная", "желательный", "предпочтительно",
+    "можно", "хочу", "мне", "который", "которая", "которые",
+}
+_desired_markers = {"желательно", "желательная", "желательный", "предпочтительно", "можно"}
 
 
 def clear_index_cache() -> None:
@@ -74,6 +82,105 @@ def _score(query: str, name: str) -> tuple[float, str]:
     return score, "fuzzy"
 
 
+def _tokens(value: Any) -> list[str]:
+    normalized = _normalize(value)
+    numbers = [_compact(match.group(0)) for match in _number_unit_pattern.finditer(normalized)]
+    words = [
+        token
+        for token in _word_pattern.findall(normalized)
+        if token not in _stop_words and (len(token) > 1 or token.isdigit())
+    ]
+    return list(dict.fromkeys(numbers + words))
+
+
+def _flatten_search_text(value: Any) -> list[str]:
+    if isinstance(value, dict):
+        result: list[str] = []
+        for key, nested in value.items():
+            result.extend(_flatten_search_text(key))
+            result.extend(_flatten_search_text(nested))
+        return result
+    if isinstance(value, list):
+        result = []
+        for nested in value:
+            result.extend(_flatten_search_text(nested))
+        return result
+    return _tokens(value)
+
+
+def _parse_semantic_query(query: str) -> tuple[list[str], list[str]]:
+    normalized = _normalize(query)
+    all_tokens = _tokens(normalized)
+    desired_tokens: list[str] = []
+    for marker in _desired_markers:
+        if marker in normalized:
+            suffix = normalized.split(marker, 1)[1]
+            desired_tokens.extend(_tokens(suffix))
+    desired = list(dict.fromkeys(desired_tokens))
+    required = [token for token in all_tokens if token not in set(desired)]
+    return required, desired
+
+
+def semantic_search_catalog(query: str, index_path: Path, max_results: int = 5) -> dict[str, Any]:
+    required, desired = _parse_semantic_query(query)
+    if not required and not desired:
+        raise ValueError("semantic search query must contain a purpose or characteristic")
+    items = _load_items(index_path)
+    candidates: list[tuple[float, int, dict[str, Any], list[str], list[str]]] = []
+    for item in items:
+        searchable_tokens = set(
+            _flatten_search_text(
+                {
+                    "name": item.get("name"),
+                    "article": item.get("article"),
+                    "description": item.get("description"),
+                    "properties": item.get("properties"),
+                }
+            )
+        )
+        matched_required = [token for token in required if token in searchable_tokens]
+        matched_desired = [token for token in desired if token in searchable_tokens]
+        missing_required = [token for token in required if token not in searchable_tokens]
+        required_score = len(matched_required) / len(required) if required else 1.0
+        desired_score = len(matched_desired) / len(desired) if desired else 1.0
+        score = required_score * 0.75 + desired_score * 0.25
+        if score <= 0:
+            continue
+        candidates.append((score, int(item["id"]), item, matched_required, matched_desired))
+
+    candidates.sort(key=lambda candidate: (-candidate[0], candidate[1]))
+    results = []
+    for score, _, item, matched_required, matched_desired in candidates[:max_results]:
+        matched = matched_required + matched_desired
+        missing = [token for token in required if token not in matched_required]
+        explanation_parts = []
+        if matched_required:
+            explanation_parts.append(f"обязательные параметры: {', '.join(matched_required)}")
+        if matched_desired:
+            explanation_parts.append(f"желательные параметры: {', '.join(matched_desired)}")
+        if missing:
+            explanation_parts.append(f"не подтверждено: {', '.join(missing)}")
+        if not explanation_parts:
+            explanation_parts.append("совпадение по назначению или названию")
+        results.append(
+            dict(
+                item,
+                match_type="semantic",
+                score=round(score, 4),
+                explanation="; ".join(explanation_parts),
+                matched_parameters=matched,
+                missing_required_parameters=missing,
+            )
+        )
+    return {
+        "query": query,
+        "mode": "semantic",
+        "parsed": {"required": required, "desired": desired},
+        "results": results,
+        "count": len(results),
+    }
+
+
 def search_catalog(query: str, index_path: Path, max_results: int = 5) -> dict[str, Any]:
     normalized_query = _normalize(query)
     if not normalized_query:
@@ -111,4 +218,3 @@ def search_catalog(query: str, index_path: Path, max_results: int = 5) -> dict[s
     candidates.sort(key=lambda candidate: (-candidate[0], candidate[1]))
     results = [dict(item, match_type=match_type, score=round(score, 4)) for score, _, match_type, item in candidates[:max_results]]
     return {"query": query, "mode": "fuzzy", "results": results, "count": len(results)}
-

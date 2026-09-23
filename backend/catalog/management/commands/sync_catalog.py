@@ -14,6 +14,12 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--max-pages", type=int, default=settings.CATALOG_SYNC_MAX_PAGES)
         parser.add_argument("--per-page", type=int, default=settings.CATALOG_SYNC_PER_PAGE)
+        parser.add_argument(
+            "--include-details",
+            action="store_true",
+            default=settings.CATALOG_SYNC_INCLUDE_DETAILS,
+            help="Enrich every indexed item with its detail fields for semantic search",
+        )
 
     def handle(self, *args, **options):
         provider = get_catalog_provider()
@@ -23,6 +29,7 @@ class Command(BaseCommand):
             status_path=settings.CATALOG_SYNC_STATUS_PATH,
             max_pages=options["max_pages"],
             per_page=options["per_page"],
+            include_details=options["include_details"],
         )
         self.stdout.write(json.dumps(asdict(result), ensure_ascii=False, indent=2, default=str))
         if not result.success:
