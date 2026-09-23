@@ -49,7 +49,24 @@ function installFetch(handler = () => jsonResponse({})) {
     if (url === "/api/cart" && (!options.method || options.method === "GET")) {
       return jsonResponse({ version: 0, currency: "KZT", items: [], total: "0.00", url: "/demo/cart/" });
     }
+    if (url === "/api/dialog" && (!options.method || options.method === "GET")) {
+      return jsonResponse({ dialog_id: "dialog-test", state: "idle", history: [] });
+    }
     if (String(url).startsWith("/api/products/detail")) return jsonResponse(PRODUCT);
+    if (url === "/api/dialog/messages") {
+      const request = JSON.parse(options.body || "{}");
+      return jsonResponse({
+        dialog_id: "dialog-test",
+        state: "done",
+        message: {
+          id: "assistant-from-api",
+          role: "assistant",
+          state: "done",
+          content: request.text === "Хочу купить" ? "Уточните, какой товар вам нужен." : "Нашёл товар в каталоге.",
+          products: /автомат|legrand/i.test(request.text || "") ? [PRODUCT] : [],
+        },
+      });
+    }
     return handler(url, options);
   }));
 }
@@ -149,6 +166,19 @@ describe("cart confirmation flow", () => {
         return cartReads === 1
           ? jsonResponse({ error: { code: "temporary_failure" } }, 503)
           : jsonResponse({ items: [], total: "0.00", url: "/demo/cart/" });
+      }
+      if (url === "/api/dialog/messages") {
+        return jsonResponse({
+          dialog_id: "dialog-test",
+          state: "done",
+          message: {
+            id: "assistant-from-api",
+            role: "assistant",
+            state: "done",
+            content: "Нашёл товар в каталоге.",
+            products: [PRODUCT],
+          },
+        });
       }
       if (String(url).startsWith("/api/products/detail")) return jsonResponse(PRODUCT);
       if (url === "/api/cart/actions") return jsonResponse(action({ quantity: 1, total: "917.00" }), 201);
@@ -291,7 +321,7 @@ describe("cart confirmation flow", () => {
     await user.type(input, "Хочу купить");
     await user.keyboard("{Enter}");
 
-    expect(await screen.findByText(/демонстрационный каркас чата/i, {}, { timeout: 2500 })).toBeInTheDocument();
+    expect(await screen.findByText("Уточните, какой товар вам нужен.", {}, { timeout: 2500 })).toBeInTheDocument();
     expect(fetch.mock.calls.some(([url]) => url === "/api/cart/actions/confirm-text")).toBe(false);
   });
 

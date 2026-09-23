@@ -5,11 +5,9 @@ import {
   confirmCartText,
   createCartAction,
   getCart,
-  getProduct,
 } from "./cartApi.js";
 
 const MAX_MESSAGE_LENGTH = 1200;
-const DEMO_PRODUCT_ID = 900001;
 const TEXT_CONFIRMATIONS = new Set(["да", "подтверждаю", "добавить в корзину"]);
 const SAFE_ERROR_MESSAGE =
   "Не удалось получить ответ. Проверьте соединение и попробуйте ещё раз.";
@@ -32,73 +30,6 @@ const SUGGESTIONS = [
     prompt: "Подберите аналог отсутствующего автомата 3P",
   },
 ];
-
-const DEMO_PRODUCT = {
-  id: 515291,
-  name: "027228 АВ DRX250 MT 3ф 160А 18ka Legrand (1)",
-  article: "200300285_",
-  price: 64920,
-  quantity: 23,
-  image: "https://ekt.kz/upload/iblock/1ca/8mdfx6517jvalt5da1n9865q2fzpj6jp/027228_av_drx250_mt_3f_160a_18ka_legrand_1.jpg",
-  url: "https://ekt.kz/catalog/nizkovoltnaya_apparatura/silovye_avtomaticheskie_vyklyuchateli/drx250_mt_10_250_a_legrand/027228_av_drx250_mt_3f_160a_18ka_legrand_1/",
-  data_status: "live",
-  verified_at: new Date().toISOString(),
-  characteristics: [
-    ["Серия", "DRX250 MT"],
-    ["Полюса", "3"],
-    ["Номинальный ток", "160 А"],
-    ["Отключающая способность", "18 кА"],
-    ["Напряжение", "400 В AC"],
-    ["Бренд", "Legrand"],
-  ],
-  fit_reason: "Подходит для промышленной и коммерческой сети, если нужны 3 полюса и ток до 160 А.",
-  important_difference: "Перед заказом проверьте ток уставки: в свойствах каталога также указано номинальное значение 250 А.",
-};
-
-const DEMO_ANALOG_COMPARISON = {
-  is_demo: true,
-  source_product: {
-    id: 900003,
-    name: "Автоматический выключатель ВА47-29 3P 10A IEK",
-    article: "ДЕМО-01-003",
-  },
-  analog: {
-    id: 900006,
-    name: "Автоматический выключатель ВА47-29 3P 16A IEK",
-    article: "ДЕМО-01-006",
-    price: { amount: 1625, currency: "KZT" },
-    availability: { status: "available", sellable_quantity: 1, unit: "шт." },
-    data_status: "live",
-    verified_at: new Date().toISOString(),
-  },
-  why_fits: "Та же серия, бренд и трёхполюсное исполнение. Аналог есть в продаваемом остатке.",
-  matching_parameters: [
-    ["Категория", "Автоматический выключатель"],
-    ["Серия", "ВА47-29"],
-    ["Количество полюсов", "3P"],
-    ["Бренд", "IEK"],
-  ],
-  differences: [
-    {
-      label: "Номинальный ток",
-      source: "10 A",
-      analog: "16 A",
-      note: "Существенное отличие: подтвердите допустимый ток до замены.",
-    },
-    {
-      label: "Цена",
-      source: "1 167 ₸",
-      analog: "1 625 ₸",
-      note: "Аналог дороже на 458 ₸ по данным demo-fixture.",
-    },
-    {
-      label: "Продаваемый остаток",
-      source: "0 шт.",
-      analog: "1 шт.",
-      note: "Аналог доступен, исходная позиция недоступна.",
-    },
-  ],
-};
 
 function createWelcomeMessage() {
   return {
@@ -143,57 +74,48 @@ function sanitizeAssistantText(value) {
     : withoutSecrets;
 }
 
-async function createAssistantResponse(prompt, signal) {
-  const normalized = prompt.toLowerCase();
-
-  if (normalized.includes("ошибка")) {
-    throw new Error("demo_failure");
-  }
-
-  if (normalized.includes("достав")) {
-    return "Подскажу условия доставки после уточнения города и суммы заказа. Для Алматы точный порог бесплатной доставки сейчас нужно подтвердить по актуальному условию — я не буду называть неподтверждённую сумму.";
-  }
-
-  if (normalized.includes("кабел")) {
-    return "Помогу подобрать кабель по сечению, материалу жил, напряжению и способу прокладки. Уточните длину и где он будет использоваться — так я отберу релевантные позиции из каталога.";
-  }
-
-  if (normalized.includes("аналог")) {
-    return {
-      content: "Нашёл доступный аналог и сравнил критичные параметры:",
-      analogComparison: {
-        ...DEMO_ANALOG_COMPARISON,
-        analog: {
-          ...DEMO_ANALOG_COMPARISON.analog,
-          verified_at: new Date().toISOString(),
-        },
-      },
-    };
-  }
-
-  if (normalized.includes("автомат") || normalized.includes("legrand")) {
-    const product = await getProduct(DEMO_PRODUCT_ID, { signal });
-    return {
-      content: "Нашёл демонстрационную позицию в каталоге. Укажите количество и проверьте резюме перед добавлением:",
-      product: { ...product, verified_at: new Date().toISOString() },
-    };
-  }
-
-  return "Принял запрос. В рабочей версии я найду товар в каталоге, проверю актуальные цену и наличие, а при необходимости покажу объяснимые аналоги. Сейчас это демонстрационный каркас чата.";
+function csrfToken() {
+  const prefix = "csrftoken=";
+  const cookie = document.cookie.split(";").map((part) => part.trim()).find((part) => part.startsWith(prefix));
+  return cookie ? decodeURIComponent(cookie.slice(prefix.length)) : "";
 }
 
-async function requestDemoAnswer(prompt, signal) {
-  await new Promise((resolve, reject) => {
-    const timeoutId = window.setTimeout(resolve, 650);
-    signal.addEventListener("abort", () => {
-      window.clearTimeout(timeoutId);
-      const error = new Error("aborted");
-      error.name = "AbortError";
-      reject(error);
-    }, { once: true });
+async function requestAssistantAnswer(prompt, dialogId, signal) {
+  const response = await fetch("/api/dialog/messages", {
+    method: "POST",
+    credentials: "same-origin",
+    signal,
+    headers: {
+      "Content-Type": "application/json",
+      ...(csrfToken() ? { "X-CSRFToken": csrfToken() } : {}),
+    },
+    body: JSON.stringify({ text: prompt, ...(dialogId ? { dialog_id: dialogId } : {}) }),
   });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = new Error(payload?.error?.message || SAFE_ERROR_MESSAGE);
+    error.code = payload?.error?.code;
+    throw error;
+  }
+  return payload;
+}
 
-  return createAssistantResponse(prompt, signal);
+async function requestDialogState(signal) {
+  const response = await fetch("/api/dialog", { credentials: "same-origin", signal });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload?.dialog_id) throw new Error("dialog_state_unavailable");
+  return payload;
+}
+
+async function clearServerDialog() {
+  const response = await fetch("/api/dialog/history", {
+    method: "DELETE",
+    credentials: "same-origin",
+    headers: csrfToken() ? { "X-CSRFToken": csrfToken() } : {},
+  });
+  const payload = await response.json().catch(() => null);
+  if (!response.ok || !payload?.dialog_id) throw new Error("dialog_clear_unavailable");
+  return payload;
 }
 
 function Icon({ name, size = 18 }) {
@@ -771,7 +693,7 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
   const openFocusTimerRef = useRef(null);
   const pendingRef = useRef(null);
   const cartLockRef = useRef(false);
-  const dialogIdRef = useRef(createId("dialog"));
+  const dialogIdRef = useRef("");
   const messageVersionRef = useRef(0);
   const proposalRetryRef = useRef(new Map());
 
@@ -787,14 +709,23 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
   }, []);
 
   useEffect(() => {
+    let active = true;
     if (isOpen) {
       openFocusTimerRef.current = window.setTimeout(() => {
         openFocusTimerRef.current = null;
         inputRef.current?.focus();
       }, 120);
+      if (!dialogIdRef.current) {
+        void requestDialogState().then((dialog) => {
+          if (active) dialogIdRef.current = dialog.dialog_id;
+        }).catch(() => {
+          // The first POST can still establish a dialog; surface only an actual send failure.
+        });
+      }
     }
 
     return () => {
+      active = false;
       if (openFocusTimerRef.current) window.clearTimeout(openFocusTimerRef.current);
       openFocusTimerRef.current = null;
     };
@@ -1133,10 +1064,11 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
     const statusTimer = window.setTimeout(() => setPhase("processing"), 280);
     pendingRef.current = { controller, statusTimer };
     setPhase("submitting");
-    requestDemoAnswer(prompt, controller.signal)
+    requestAssistantAnswer(prompt, dialogIdRef.current, controller.signal)
       .then((answer) => {
         if (controller.signal.aborted) return;
-        const response = typeof answer === "string" ? { content: answer } : answer;
+        const response = answer?.message ?? {};
+        dialogIdRef.current = answer?.dialog_id ?? dialogIdRef.current;
         pendingRef.current = null;
         window.clearTimeout(statusTimer);
         setPhase("idle");
@@ -1146,8 +1078,7 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
             id: createId("assistant"),
             role: "assistant",
             content: sanitizeAssistantText(response?.content),
-            product: response?.product,
-            analogComparison: response?.analogComparison,
+            product: response?.products?.[0],
             time: getTimeLabel(),
           },
         ]);
@@ -1178,10 +1109,15 @@ function ChatWidget({ cartStatus, isOpen, onCartChange, onEnsureCart, onOpenChan
     setPhase("idle");
     setCartRequest(null);
     cartLockRef.current = false;
-    dialogIdRef.current = createId("dialog");
+    dialogIdRef.current = "";
     messageVersionRef.current = 0;
     proposalRetryRef.current.clear();
     setIsClearDialogOpen(false);
+    void clearServerDialog().then((dialog) => {
+      dialogIdRef.current = dialog.dialog_id;
+    }).catch(() => {
+      // A later message without an ID safely creates or resumes a server dialog.
+    });
     requestAnimationFrame(() => inputRef.current?.focus());
   }, [cancelGeneration]);
 
