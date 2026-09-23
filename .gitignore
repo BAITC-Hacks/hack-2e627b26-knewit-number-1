@@ -3,9 +3,9 @@
 !.env.example
 
 node_modules/
+.venv/
 dist/
 build/
 __pycache__/
 *.py[cod]
 .pytest_cache/
-
