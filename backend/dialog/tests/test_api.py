@@ -1,6 +1,11 @@
 import json
+from copy import deepcopy
+from unittest.mock import Mock, patch
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
+
+from catalog.errors import CatalogError
+from catalog.providers.fixture import PRODUCTS_BY_ID
 
 
 class DialogApiTests(TestCase):
@@ -60,3 +65,114 @@ class DialogApiTests(TestCase):
         retry = self.client.post(f"/api/dialog/messages/{user_id}/retry")
         self.assertEqual(retry.status_code, 200)
         self.assertEqual(retry.json()["state"], "done")
+
+    @override_settings(OPENAI_ENABLED=False, OPENAI_API_KEY="", CATALOG_PROVIDER="fixture")
+    def test_numeric_selected_product_uses_detail_for_verified_fallback_facts(self):
+        response = self.post_message("900001")
+
+        self.assertEqual(response.status_code, 200)
+        message = response.json()["message"]
+        self.assertEqual(message["source_status"], "sourced")
+        self.assertEqual(message["products"][0]["id"], 900001)
+        fact = message["facts"][0]
+        self.assertEqual(fact["source"], "catalog_detail_api")
+        self.assertEqual(fact["availability"]["status"], "available")
+        self.assertIn("RATED_CURRENT", fact["characteristics"])
+
+    @override_settings(OPENAI_ENABLED=False, OPENAI_API_KEY="", CATALOG_PROVIDER="fixture")
+    def test_selected_search_result_is_refreshed_from_detail_api(self):
+        session = self.client.session
+        session["dialog_context"] = {
+            "dialog_id": "test-dialog",
+            "version": 1,
+            "state": "done",
+            "history": [
+                {"id": "welcome", "role": "assistant", "content": "Здравствуйте"},
+                {
+                    "id": "search-result",
+                    "role": "assistant",
+                    "content": "Нашёл вариант",
+                    "products": [{"id": 900001, "name": "Устаревший поисковый снимок"}],
+                },
+            ],
+            "attachments": {},
+        }
+        session.save()
+
+        response = self.post_message("этот товар", "test-dialog")
+
+        self.assertEqual(response.status_code, 200)
+        message = response.json()["message"]
+        self.assertEqual(message["resolved_reference"], {"product_id": 900001})
+        self.assertEqual(message["facts"][0]["source"], "catalog_detail_api")
+        self.assertNotEqual(message["products"][0]["name"], "Устаревший поисковый снимок")
+
+    @override_settings(OPENAI_ENABLED=False, OPENAI_API_KEY="")
+    @patch("dialog.views.get_catalog_provider")
+    def test_detail_fallback_tolerates_missing_fields_and_returns_safe_documents(self, provider_factory):
+        detail = deepcopy(PRODUCTS_BY_ID[900001])
+        detail.pop("description")
+        detail["properties"] = None
+        detail["availability"] = None
+        detail["certificates"] = [
+            "https://ekt.kz/docs/certificate.pdf",
+            "javascript:alert(1)",
+        ]
+        provider_factory.return_value = Mock(get_product=Mock(return_value=detail))
+
+        response = self.post_message("900001")
+
+        self.assertEqual(response.status_code, 200)
+        message = response.json()["message"]
+        fact = message["facts"][0]
+        self.assertEqual(fact["documents"], [{"label": "Сертификат", "url": "https://ekt.kz/docs/certificate.pdf"}])
+        self.assertNotIn("description", message["products"][0])
+        self.assertIsNone(fact["availability"])
+        self.assertEqual(fact["characteristics"], {})
+
+    @override_settings(OPENAI_ENABLED=False, OPENAI_API_KEY="")
+    @patch("dialog.views.get_catalog_provider")
+    def test_numeric_selected_product_hides_search_snapshot_when_detail_is_unavailable(self, provider_factory):
+        provider_factory.return_value = Mock(
+            get_product=Mock(side_effect=CatalogError(502, "catalog_unavailable", "unavailable"))
+        )
+
+        response = self.post_message("900001")
+
+        self.assertEqual(response.status_code, 200)
+        message = response.json()["message"]
+        self.assertEqual(message["source_status"], "missing")
+        self.assertEqual(message["products"], [])
+        self.assertEqual(message["facts"], [])
+
+    @override_settings(OPENAI_ENABLED=False, OPENAI_API_KEY="")
+    @patch("dialog.views.get_catalog_provider")
+    def test_selected_reference_hides_snapshot_when_detail_is_unavailable(self, provider_factory):
+        provider_factory.return_value = Mock(
+            get_product=Mock(side_effect=CatalogError(502, "catalog_unavailable", "unavailable"))
+        )
+        session = self.client.session
+        session["dialog_context"] = {
+            "dialog_id": "test-dialog",
+            "version": 1,
+            "state": "done",
+            "history": [
+                {"id": "welcome", "role": "assistant", "content": "Здравствуйте"},
+                {
+                    "id": "search-result",
+                    "role": "assistant",
+                    "content": "Нашёл вариант",
+                    "products": [{"id": 900001, "name": "Устаревший поисковый снимок"}],
+                },
+            ],
+            "attachments": {},
+        }
+        session.save()
+
+        response = self.post_message("этот товар", "test-dialog")
+
+        self.assertEqual(response.status_code, 200)
+        message = response.json()["message"]
+        self.assertEqual(message["source_status"], "missing")
+        self.assertEqual(message["products"], [])
+        self.assertEqual(message["facts"], [])
