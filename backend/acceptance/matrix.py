@@ -31,7 +31,7 @@ _ROWS = (
     ("SEC-015", "FR-CHAT-006, SEC-1-2", "P0", "secret redaction fixture", "Basic Auth never appears in response/log evidence", "catalog.tests.test_security"),
     ("SEC-016", "FR-CART-007, API-9", "P0", "cart validation fixtures", "invalid ids/quantities/URLs have no side effect", "cart.tests.test_api, catalog.tests.test_security"),
     ("KB-017", "FR-KB-001-004", "P0", "knowledge-base-v1", "published payment answer matches reviewed entry", "knowledge_base.tests.test_engine"),
-    ("FILE-018", "FR-FILE-003-004", "P1", "file safety fixtures", "macro or invalid signature is rejected", "acceptance evidence pending file adapter"),
+    ("FILE-018", "FR-FILE-003-004", "P1", "file safety fixtures", "macro or invalid signature is rejected", "dialog.tests.test_attachments"),
     ("UI-019", "NFR-13.3", "P0", "viewport-320", "chat and confirmation fit without horizontal overflow", "frontend/src/App.test.jsx"),
     ("UI-020", "NFR-13.4", "P0", "keyboard-only", "focusable controls have keyboard path", "frontend/src/App.test.jsx"),
     ("CHAT-021", "FR-CHAT-002", "P0", "dialog-context-v1", "second reference resolves in current dialog", "dialog.tests.test_api"),
