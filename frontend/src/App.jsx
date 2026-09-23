@@ -1843,11 +1843,18 @@ function CatalogPage() {
   );
 }
 
-function ProductDetailPage({ productId }) {
+function ProductDetailPage({ productId, cartQuantity = 0, onAddToCart, onChangeCartQuantity }) {
   const [product, setProduct] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [isStale, setIsStale] = useState(false);
+  const [cartNotice, setCartNotice] = useState(null);
+
+  const showCartNotice = useCallback((type, text) => {
+    setCartNotice({ type, text });
+    window.clearTimeout(showCartNotice.timeout);
+    showCartNotice.timeout = window.setTimeout(() => setCartNotice(null), 2400);
+  }, []);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -1895,9 +1902,12 @@ function ProductDetailPage({ productId }) {
   const normalized = product?.normalized || product;
   const properties = normalized?.properties_raw || product?.properties || {};
   const image = product?.image || normalized?.image_url;
+  const availableQuantity = Number(normalized?.availability?.sellable_quantity ?? product?.quantity ?? 0);
+  const canAdd = availableQuantity > cartQuantity;
 
   return (
     <main className="product-detail-page">
+      {cartNotice && <div className={`cart-toast cart-toast--${cartNotice.type}`} role="status">{cartNotice.text}</div>}
       <a className="catalog-back" href="#catalog">← Вернуться в каталог</a>
       {loading && <div className="catalog-loading">Загружаем информацию о товаре…</div>}
       {error && <div className="catalog-error">{error}</div>}
@@ -1917,6 +1927,23 @@ function ProductDetailPage({ productId }) {
               <div className="product-detail-stock">
                 {normalized.availability?.sellable_quantity ?? product.quantity ?? "—"} шт. доступно для продажи
               </div>
+              {cartQuantity > 0 ? (
+                <div className="product-quantity-control">
+                  <button type="button" onClick={() => onChangeCartQuantity(product.id, cartQuantity - 1)}>−</button>
+                  <strong>{cartQuantity}</strong>
+                  <button type="button" onClick={() => {
+                    if (!canAdd) showCartNotice("error", "Товара нет в наличии");
+                    else { onAddToCart(product); showCartNotice("success", "Добавилось в корзину"); }
+                  }}>+</button>
+                </div>
+              ) : (
+                <button className="product-add-button" type="button" onClick={() => {
+                  if (!canAdd) showCartNotice("error", "Товара нет в наличии");
+                  else { onAddToCart(product); showCartNotice("success", "Добавилось в корзину"); }
+                }}>
+                  Добавить в корзину
+                </button>
+              )}
             </section>
           </div>
           <section className="product-properties">
@@ -1931,17 +1958,79 @@ function ProductDetailPage({ productId }) {
   );
 }
 
-function SitePreview({ cart, language, onLanguageRequest, onOpenChat }) {
+function shopProductPrice(product) {
+  return Number(product?.normalized?.price?.amount ?? product?.price ?? 0) || 0;
+}
+
+function ShopCartPage({ items, onChangeQuantity, onRemove }) {
+  const total = items.reduce((sum, item) => sum + shopProductPrice(item.product) * item.quantity, 0);
+  const count = items.reduce((sum, item) => sum + item.quantity, 0);
+
+  return (
+    <main className="shop-cart-page">
+      <a className="catalog-back" href="#top">← Вернуться на главную</a>
+      <div className="shop-cart-heading">
+        <div><p className="eyebrow">Корзина</p><h1>Моя корзина</h1></div>
+        <span>{count} {count === 1 ? "товар" : "товаров"}</span>
+      </div>
+      {items.length === 0 ? (
+        <div className="shop-cart-empty">Корзина пока пуста. Откройте товар и добавьте его сюда.</div>
+      ) : (
+        <div className="shop-cart-layout">
+          <section className="shop-cart-items">
+            <h2>Товары в корзине</h2>
+            <div className="shop-cart-table-head"><span>Товар</span><span>Цена</span><span>Количество</span><span>Сумма</span><span /></div>
+            {items.map(({ product, quantity }) => {
+              const price = shopProductPrice(product);
+              const name = product?.normalized?.name || product?.name || "Товар";
+              const image = product?.image || product?.normalized?.image_url;
+              return (
+                <article className="shop-cart-row" key={product.id}>
+                  <div className="shop-cart-product">
+                    <div className="shop-cart-image">{image ? <img src={image} alt="" /> : <span>EKT</span>}</div>
+                    <div><strong>{name}</strong><small>Артикул: {product?.article || "не указан"}</small></div>
+                  </div>
+                  <strong className="shop-cart-price">{formatNumber(price)} ₸</strong>
+                  <div className="shop-quantity"><button type="button" onClick={() => onChangeQuantity(product.id, quantity - 1)}>−</button><span>{quantity}</span><button type="button" onClick={() => onChangeQuantity(product.id, quantity + 1)}>+</button></div>
+                  <strong className="shop-cart-sum">{formatNumber(price * quantity)} ₸</strong>
+                  <button className="shop-cart-remove" type="button" aria-label="Удалить товар" onClick={() => onRemove(product.id)}>×</button>
+                </article>
+              );
+            })}
+          </section>
+          <aside className="shop-cart-summary"><h2>Итого в корзине</h2><strong>{formatNumber(total)} ₸</strong><button type="button">Оформить заказ</button></aside>
+        </div>
+      )}
+    </main>
+  );
+}
+
+function SitePreview({ cart, shopCartItems, language, onLanguageRequest, onOpenChat }) {
   const copy = getMessages(language).site;
+  const [featuredProducts, setFeaturedProducts] = useState([]);
   const categories = [
     ["Кабель / провод", "Кабель, провод и аксессуары", "#d9f3e9"],
     ["Светильники", "LED, лампы и управление светом", "#e3edff"],
     ["Низковольтная аппаратура", "Автоматика и защита сетей", "#fff0cc"],
     ["Монтаж и инструмент", "Всё для надёжного монтажа", "#f1e5ff"],
   ];
-  const cartCount = Array.isArray(cart?.items)
-    ? cart.items.reduce((total, item) => total + (toFiniteNumber(item?.quantity) ?? 0), 0)
+  const cartCount = Array.isArray(shopCartItems)
+    ? shopCartItems.reduce((total, item) => total + item.quantity, 0)
     : 0;
+
+  useEffect(() => {
+    let ignore = false;
+    getProducts(1)
+      .then((payload) => {
+        if (!ignore && payload?.data_source === "ekt") {
+          setFeaturedProducts((Array.isArray(payload.items) ? payload.items : []).slice(0, 4));
+        }
+      })
+      .catch(() => {
+        if (!ignore) setFeaturedProducts([]);
+      });
+    return () => { ignore = true; };
+  }, []);
 
   return (
     <main className="site-preview">
@@ -1973,9 +2062,7 @@ function SitePreview({ cart, language, onLanguageRequest, onOpenChat }) {
           <a
             aria-label={copy.cartAria(cartCount)}
             className="cart-button"
-            href={cart?.url || "/demo/cart/"}
-            rel="noopener noreferrer"
-            target="_blank"
+            href="#cart"
           >
             <Icon name="cart" size={16} />
             {copy.cart} <span className="cart-count">{cartCount}</span>
@@ -2003,17 +2090,9 @@ function SitePreview({ cart, language, onLanguageRequest, onOpenChat }) {
       </section>
 
       <section className="category-section" id="catalog">
-        <div className="section-heading"><div><span className="section-overline">{copy.overline}</span><h2>{copy.find}</h2></div><span className="section-note">{copy.directions}</span></div>
-        <div className="category-grid">
-          {categories.map(([title, description, color], index) => (
-            <a className="category-card" href="#catalog" key={title}>
-              <span className="category-number">0{index + 1}</span>
-              <span className="category-icon" style={{ backgroundColor: color }}>{["⌁", "◉", "▣", "⌗"][index]}</span>
-              <strong>{title}</strong>
-              <span>{description}</span>
-              <span className="category-arrow">↗</span>
-            </a>
-          ))}
+        <div className="section-heading"><div><span className="section-overline">{copy.overline}</span><h2>{copy.find}</h2></div><a className="section-note section-note-link" href="#catalog">Все</a></div>
+        <div className="catalog-product-grid featured-product-grid">
+          {featuredProducts.map((product) => <CatalogProductCard key={product.id} product={product} />)}
         </div>
       </section>
 
@@ -2039,7 +2118,35 @@ export default function App() {
   const [isChatOpen, setIsChatOpen] = useState(false);
   const [route, setRoute] = useState(window.location.hash);
   const [cart, setCart] = useState({ items: [], total: "0.00", url: "/demo/cart/" });
+  const [shopCartItems, setShopCartItems] = useState(() => {
+    try { return JSON.parse(localStorage.getItem("ekt-shop-cart") || "[]"); } catch { return []; }
+  });
   const [cartStatus, setCartStatus] = useState("loading");
+
+  useEffect(() => {
+    localStorage.setItem("ekt-shop-cart", JSON.stringify(shopCartItems));
+  }, [shopCartItems]);
+
+  const addToShopCart = useCallback((product) => {
+    if (!product?.id) return;
+    setShopCartItems((current) => {
+      const existing = current.find((item) => item.product.id === product.id);
+      if (existing) return current.map((item) => item.product.id === product.id ? { ...item, quantity: item.quantity + 1 } : item);
+      return [...current, { product, quantity: 1 }];
+    });
+  }, []);
+
+  const changeShopCartQuantity = useCallback((productId, quantity) => {
+    setShopCartItems((current) => quantity < 1 ? current.filter((item) => item.product.id !== productId) : current.map((item) => item.product.id === productId ? { ...item, quantity } : item));
+  }, []);
+
+  const removeFromShopCart = useCallback((productId) => {
+    setShopCartItems((current) => current.filter((item) => item.product.id !== productId));
+  }, []);
+
+  const getShopCartQuantity = useCallback((productId) => (
+    shopCartItems.find((item) => item.product.id === Number(productId))?.quantity ?? 0
+  ), [shopCartItems]);
 
   useEffect(() => {
     const onHashChange = () => setRoute(window.location.hash);
@@ -2080,13 +2187,21 @@ export default function App() {
 
   return (
     <>
-      {route === "#catalog" ? (
+      {route === "#cart" ? (
+        <ShopCartPage items={shopCartItems} onChangeQuantity={changeShopCartQuantity} onRemove={removeFromShopCart} />
+      ) : route === "#catalog" ? (
         <CatalogPage />
       ) : route.startsWith("#product/") ? (
-        <ProductDetailPage productId={route.slice("#product/".length)} />
+        <ProductDetailPage
+          productId={route.slice("#product/".length)}
+          cartQuantity={getShopCartQuantity(route.slice("#product/".length))}
+          onAddToCart={addToShopCart}
+          onChangeCartQuantity={changeShopCartQuantity}
+        />
       ) : (
         <SitePreview
           cart={cart}
+          shopCartItems={shopCartItems}
           language={language}
           onLanguageRequest={setLanguageChangeRequest}
           onOpenChat={() => setIsChatOpen(true)}
