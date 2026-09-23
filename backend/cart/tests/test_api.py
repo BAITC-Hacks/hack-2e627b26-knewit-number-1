@@ -14,6 +14,7 @@ from django.utils import timezone
 from catalog.providers.fixture import PRODUCTS_BY_ID
 from cart.errors import CartApiError
 from cart.models import CartAction, CartItem, CartMutation
+from cart.service import _maximum_valid_quantity, _sales_rules, _validate_sales_quantity
 
 
 @override_settings(CATALOG_PROVIDER="fixture", FIXTURE_TIMEOUT_SECONDS=0)
@@ -133,6 +134,16 @@ class CartApiTests(TestCase):
         self.assertEqual(CartItem.objects.get().quantity, 2)
         self.assertEqual(CartMutation.objects.count(), 1)
 
+    def test_proposal_and_confirmation_each_perform_a_live_catalog_read(self):
+        from cart import service
+
+        with patch("cart.service._load_detail", wraps=service._load_detail) as live_read:
+            action_id = self.propose().json()["action_id"]
+            response = self.confirm(action_id)
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(live_read.call_count, 2)
+
     def test_confirmation_body_cannot_change_proposal(self):
         action_id = self.propose().json()["action_id"]
         response = self.confirm(action_id, {"quantity": 7})
@@ -251,6 +262,59 @@ class CartApiTests(TestCase):
         )
         self.assertEqual(CartItem.objects.count(), 0)
 
+    def test_price_version_change_returns_new_summary_without_mutation(self):
+        action_id = self.propose().json()["action_id"]
+        changed = copy.deepcopy(PRODUCTS_BY_ID[900001])
+        changed["fixture_version"] = "catalog-fixture-v2"
+        changed["availability"] = {
+            "status": "available",
+            "sellable_quantity": 8,
+            "rule_version": "fixture-allowlist-v1",
+        }
+
+        with patch("cart.service._load_detail", return_value=changed):
+            response = self.confirm(action_id)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "action_stale")
+        self.assertEqual(
+            response.json()["replacement_action"]["price_version"],
+            "catalog-fixture-v2",
+        )
+        self.assertEqual(CartItem.objects.count(), 0)
+
+    def test_currency_change_rebinds_empty_cart_before_replacement_confirmation(self):
+        action_id = self.propose().json()["action_id"]
+
+        with override_settings(CART_CURRENCY="USD"):
+            response = self.confirm(action_id)
+            replacement_response = self.confirm(response.json()["replacement_action"]["action_id"])
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "action_stale")
+        self.assertEqual(response.json()["replacement_action"]["currency"], "USD")
+        self.assertEqual(response.json()["replacement_action"]["expected_cart_version"], 1)
+        self.assertEqual(replacement_response.status_code, 200)
+        self.assertEqual(replacement_response.json()["cart"]["currency"], "USD")
+        self.assertEqual(CartItem.objects.get().quantity, 2)
+
+    def test_currency_change_is_rejected_for_nonempty_cart(self):
+        first = self.propose(dialog_id="dialog-a", message_id="message-a").json()
+        self.confirm(first["action_id"])
+
+        with override_settings(CART_CURRENCY="USD"):
+            response = self.propose(
+                dialog_id="dialog-b",
+                message_id="message-b",
+                product_id=900005,
+                quantity=1,
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["error"]["code"], "cart_currency_mismatch")
+        self.assertEqual(response.json()["cart"]["currency"], "KZT")
+        self.assertEqual(CartItem.objects.get().quantity, 2)
+
     def test_confirmation_rejects_mismatched_product_and_nonempty_offers(self):
         for suffix, mutate in (
             ("wrong-product", lambda detail: detail.update(id=900005)),
@@ -291,8 +355,8 @@ class CartApiTests(TestCase):
         self.assertEqual(response.json()["cart"]["items"], [])
         self.assertEqual(CartAction.objects.get(pk=action_id).status, "failed")
 
-    def test_unavailable_unknown_and_excessive_quantities_do_not_create_actions(self):
-        cases = ((900002, 1, "product_unavailable"), (900004, 1, "product_unavailable"), (900001, 9, "insufficient_stock"))
+    def test_unavailable_and_unknown_products_do_not_create_actions(self):
+        cases = ((900002, 1, "product_unavailable"), (900004, 1, "product_unavailable"))
         for index, (product_id, quantity, code) in enumerate(cases, start=1):
             with self.subTest(product_id=product_id):
                 response = self.propose(
@@ -304,6 +368,105 @@ class CartApiTests(TestCase):
                 self.assertEqual(response.status_code, 409)
                 self.assertEqual(response.json()["error"]["code"], code)
         self.assertEqual(CartAction.objects.count(), 0)
+
+    def test_initial_shortage_creates_confirmable_replacement(self):
+        response = self.propose(quantity=9)
+
+        self.assertEqual(response.status_code, 409)
+        body = response.json()
+        self.assertEqual(body["error"]["code"], "insufficient_stock")
+        self.assertEqual(body["status"], "expired")
+        self.assertEqual(body["maximum_quantity"], 8)
+        self.assertEqual(body["replacement_action"]["quantity"], 8)
+        self.assertEqual(body["replacement_action"]["status"], "proposed")
+        source = CartAction.objects.get(pk=body["action_id"])
+        replacement = CartAction.objects.get(pk=body["replacement_action"]["action_id"])
+        self.assertEqual(source.status, CartAction.Status.EXPIRED)
+        self.assertEqual(source.failure_code, "insufficient_stock")
+        self.assertEqual(replacement.replacement_for_id, source.id)
+
+        rejected = self.confirm(source.id)
+        first = self.confirm(replacement.id)
+        second = self.confirm(replacement.id)
+
+        self.assertEqual(rejected.status_code, 409)
+        self.assertEqual(rejected.json()["error"]["code"], "action_expired")
+        self.assertEqual(rejected.json()["replacement_action"]["action_id"], str(replacement.id))
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.json(), first.json())
+        self.assertEqual(CartItem.objects.get().quantity, 8)
+        self.assertEqual(CartMutation.objects.count(), 1)
+
+    def test_initial_shortage_retry_returns_same_actions_without_catalog_read(self):
+        first = self.propose(quantity=9)
+
+        with patch("cart.service._load_detail", side_effect=AssertionError("must not be called")):
+            second = self.propose(quantity=9)
+
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.json()["action_id"], first.json()["action_id"])
+        self.assertEqual(
+            second.json()["replacement_action"]["action_id"],
+            first.json()["replacement_action"]["action_id"],
+        )
+        self.assertEqual(CartAction.objects.count(), 2)
+
+    def test_existing_cart_quantity_reduces_shortage_replacement(self):
+        first = self.propose(dialog_id="dialog-a", message_id="message-a", quantity=6).json()
+        self.confirm(first["action_id"])
+
+        response = self.propose(dialog_id="dialog-b", message_id="message-b", quantity=3)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["maximum_quantity"], 2)
+        self.assertEqual(response.json()["replacement_action"]["quantity"], 2)
+
+    def test_exhausted_stock_creates_no_replacement(self):
+        first = self.propose(dialog_id="dialog-a", message_id="message-a", quantity=8).json()
+        self.confirm(first["action_id"])
+
+        response = self.propose(dialog_id="dialog-b", message_id="message-b", quantity=1)
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.json()["maximum_quantity"], 0)
+        self.assertNotIn("replacement_action", response.json())
+        source = CartAction.objects.get(pk=response.json()["action_id"])
+        self.assertEqual(source.failure_code, "insufficient_stock")
+
+    def test_quantity_payload_rejects_zero_boolean_fraction_and_string(self):
+        for index, quantity in enumerate((0, True, 1.5, "2"), start=1):
+            with self.subTest(quantity=quantity):
+                response = self.propose(message_id=f"invalid-{index}", quantity=quantity)
+                self.assertEqual(response.status_code, 400)
+                self.assertEqual(response.json()["error"]["code"], "invalid_request")
+        self.assertEqual(CartAction.objects.count(), 0)
+
+    def test_shared_quantity_rules_cover_unit_minimum_step_multiple_and_maximum(self):
+        rules = {
+            "unit": "piece",
+            "minimum": 3,
+            "step": 2,
+            "multiple": 3,
+            "maximum": 12,
+        }
+        detail_values = {"pricing_context": {"sales_rules": rules}}
+
+        normalized = _sales_rules(detail_values)
+        self.assertEqual(_maximum_valid_quantity(11, normalized), 6)
+        _validate_sales_quantity(6, normalized)
+        for quantity in (1, 3, 4, 13):
+            with self.subTest(quantity=quantity):
+                with self.assertRaises(CartApiError):
+                    _validate_sales_quantity(quantity, normalized)
+        for unsupported in (
+            {**rules, "unit": "meter"},
+            {**rules, "step": 0},
+            {**rules, "minimum": 13},
+        ):
+            with self.subTest(rules=unsupported):
+                with self.assertRaises(CartApiError) as caught:
+                    _sales_rules({"pricing_context": {"sales_rules": unsupported}})
+                self.assertEqual(caught.exception.code, "unsupported_sales_rules")
 
     @override_settings(CART_MAX_QUANTITY=3)
     def test_fixture_platform_quantity_limit_is_enforced(self):

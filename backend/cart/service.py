@@ -81,13 +81,6 @@ def validate_create_payload(payload: dict[str, Any]) -> dict[str, Any]:
     ):
         if isinstance(value, bool) or not isinstance(value, int) or value < 1:
             raise CartApiError(400, "invalid_request", f"{name} must be a positive integer")
-    if quantity > settings.CART_MAX_QUANTITY:
-        raise CartApiError(
-            422,
-            "quantity_limit_exceeded",
-            "Quantity exceeds the fixture cart limit",
-            {"maximum_quantity": settings.CART_MAX_QUANTITY},
-        )
     offer_id = payload.get("offer_id")
     if offer_id is not None:
         offer_id = _validate_identifier(str(offer_id), "offer_id")
@@ -104,6 +97,67 @@ def validate_create_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "offer_id": "",
         "quantity": quantity,
     }
+
+
+def _sales_rules(detail_values: dict[str, Any]) -> dict[str, int | str]:
+    pricing_context = detail_values.get("pricing_context")
+    rules = pricing_context.get("sales_rules") if isinstance(pricing_context, dict) else None
+    if not isinstance(rules, dict) or rules.get("unit") != "piece":
+        raise CartApiError(
+            503,
+            "unsupported_sales_rules",
+            "Product sales rules are not supported",
+        )
+    normalized: dict[str, int | str] = {"unit": "piece"}
+    for name in ("minimum", "step", "multiple", "maximum"):
+        value = rules.get(name)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            raise CartApiError(
+                503,
+                "unsupported_sales_rules",
+                "Product sales rules are not supported",
+            )
+        normalized[name] = value
+    if normalized["minimum"] > normalized["maximum"]:
+        raise CartApiError(
+            503,
+            "unsupported_sales_rules",
+            "Product sales rules are not supported",
+        )
+    return normalized
+
+
+def _quantity_is_valid(quantity: int, rules: dict[str, int | str]) -> bool:
+    return (
+        quantity >= rules["minimum"]
+        and quantity <= rules["maximum"]
+        and quantity % rules["step"] == 0
+        and quantity % rules["multiple"] == 0
+    )
+
+
+def _validate_sales_quantity(quantity: int, rules: dict[str, int | str]) -> None:
+    if quantity > rules["maximum"]:
+        raise CartApiError(
+            422,
+            "quantity_limit_exceeded",
+            "Quantity exceeds the fixture cart limit",
+            {"maximum_quantity": rules["maximum"]},
+        )
+    if not _quantity_is_valid(quantity, rules):
+        raise CartApiError(
+            422,
+            "quantity_rule_violation",
+            "Quantity does not satisfy the product sales rules",
+            {"sales_rules": rules},
+        )
+
+
+def _maximum_valid_quantity(limit: int, rules: dict[str, int | str]) -> int:
+    capped = min(max(limit, 0), rules["maximum"])
+    increment = lcm(rules["step"], rules["multiple"])
+    quantity = capped - (capped % increment)
+    return quantity if quantity >= rules["minimum"] else 0
 
 
 def _ensure_fixture_provider():
@@ -247,11 +301,43 @@ def _active_quantity(cart: Cart, product_id: int, offer_id: str = "") -> int:
     )
 
 
+def _align_empty_cart_currency(cart: Cart, currency: str) -> bool:
+    if cart.currency == currency:
+        return True
+    if CartItem.objects.filter(cart=cart).exists():
+        return False
+    cart.currency = currency
+    cart.version += 1
+    cart.save(update_fields=("currency", "version", "updated_at"))
+    return True
+
+
 def _same_request(action: CartAction, values: dict[str, Any]) -> bool:
     return (
         action.product_id == values["product_id"]
         and action.offer_id == values["offer_id"]
         and action.quantity == values["quantity"]
+    )
+
+
+def _shortage_error(action: CartAction) -> CartApiError:
+    extra = dict(action.result)
+    if not extra:
+        extra = {
+            "action_id": str(action.id),
+            "status": CartAction.Status.EXPIRED,
+            "maximum_quantity": 0,
+            "cart": cart_snapshot(action.cart),
+        }
+    if hasattr(action, "replacement"):
+        replacement = action.replacement
+        extra["maximum_quantity"] = replacement.quantity
+        extra["replacement_action"] = action_snapshot(replacement)
+    return CartApiError(
+        409,
+        "insufficient_stock",
+        "Requested quantity exceeds current sellable stock",
+        extra,
     )
 
 
@@ -271,10 +357,18 @@ def _create_action_once(owner_key: str, payload: dict[str, Any]) -> tuple[CartAc
                 "message_version_conflict",
                 "This message version is already bound to another cart proposal",
             )
+        if (
+            existing.status == CartAction.Status.EXPIRED
+            and existing.failure_code == "insufficient_stock"
+        ):
+            raise _shortage_error(existing)
         return existing, False
     detail_values = _detail_values(
         _load_detail(request_values["product_id"]), request_values["product_id"]
     )
+    rules = _sales_rules(detail_values)
+    _validate_sales_quantity(request_values["quantity"], rules)
+    shortage_error: CartApiError | None = None
     with transaction.atomic():
         cart = get_or_create_cart(owner_key)
         cart = Cart.objects.select_for_update().get(pk=cart.pk)
@@ -291,42 +385,111 @@ def _create_action_once(owner_key: str, payload: dict[str, Any]) -> tuple[CartAc
                     "message_version_conflict",
                     "This message version is already bound to another cart proposal",
                 )
+            if (
+                existing.status == CartAction.Status.EXPIRED
+                and existing.failure_code == "insufficient_stock"
+            ):
+                raise _shortage_error(existing)
             return existing, False
+
+        if not _align_empty_cart_currency(cart, detail_values["currency"]):
+            raise CartApiError(
+                409,
+                "cart_currency_mismatch",
+                "Cart currency does not match the current product currency",
+                {"cart": cart_snapshot(cart)},
+            )
 
         available_to_add = detail_values["stock"] - _active_quantity(
             cart, request_values["product_id"]
         )
-        if request_values["quantity"] > max(available_to_add, 0):
-            raise CartApiError(
-                409,
-                "insufficient_stock",
-                "Requested quantity exceeds current sellable stock",
-                {"maximum_quantity": max(available_to_add, 0), "cart": cart_snapshot(cart)},
-            )
-
         CartAction.objects.filter(
             owner_key=owner_key,
             dialog_id=request_values["dialog_id"],
             status=CartAction.Status.PROPOSED,
         ).update(status=CartAction.Status.EXPIRED, failure_code="superseded")
         now = timezone.now()
-        action = CartAction.objects.create(
-            owner_key=owner_key,
-            dialog_id=request_values["dialog_id"],
-            message_id=request_values["message_id"],
-            message_version=request_values["message_version"],
-            cart=cart,
-            expected_cart_version=cart.version,
-            product_id=request_values["product_id"],
-            offer_id="",
-            quantity=request_values["quantity"],
-            unit_price=detail_values["unit_price"],
-            currency=detail_values["currency"],
-            price_version=detail_values["price_version"],
-            pricing_context=detail_values["pricing_context"],
-            product_snapshot=detail_values["product_snapshot"],
-            expires_at=now + timedelta(seconds=settings.CART_ACTION_TTL_SECONDS),
-        )
+        expires_at = now + timedelta(seconds=settings.CART_ACTION_TTL_SECONDS)
+        if request_values["quantity"] > max(available_to_add, 0):
+            action = CartAction.objects.create(
+                owner_key=owner_key,
+                dialog_id=request_values["dialog_id"],
+                message_id=request_values["message_id"],
+                message_version=request_values["message_version"],
+                cart=cart,
+                expected_cart_version=cart.version,
+                product_id=request_values["product_id"],
+                offer_id="",
+                quantity=request_values["quantity"],
+                unit_price=detail_values["unit_price"],
+                currency=detail_values["currency"],
+                price_version=detail_values["price_version"],
+                pricing_context=detail_values["pricing_context"],
+                product_snapshot=detail_values["product_snapshot"],
+                expires_at=expires_at,
+                status=CartAction.Status.EXPIRED,
+                failure_code="insufficient_stock",
+            )
+            maximum_quantity = _maximum_valid_quantity(available_to_add, rules)
+            replacement = None
+            if maximum_quantity > 0:
+                max_version = (
+                    CartAction.objects.filter(
+                        owner_key=owner_key,
+                        dialog_id=request_values["dialog_id"],
+                        message_id=request_values["message_id"],
+                    ).aggregate(value=Max("message_version"))["value"]
+                    or request_values["message_version"]
+                )
+                replacement = CartAction.objects.create(
+                    owner_key=owner_key,
+                    dialog_id=request_values["dialog_id"],
+                    message_id=request_values["message_id"],
+                    message_version=max_version + 1,
+                    cart=cart,
+                    expected_cart_version=cart.version,
+                    product_id=request_values["product_id"],
+                    offer_id="",
+                    quantity=maximum_quantity,
+                    unit_price=detail_values["unit_price"],
+                    currency=detail_values["currency"],
+                    price_version=detail_values["price_version"],
+                    pricing_context=detail_values["pricing_context"],
+                    product_snapshot=detail_values["product_snapshot"],
+                    expires_at=expires_at,
+                    replacement_for=action,
+                )
+            result = {
+                "action_id": str(action.id),
+                "status": CartAction.Status.EXPIRED,
+                "maximum_quantity": maximum_quantity,
+                "cart": cart_snapshot(cart),
+            }
+            if replacement is not None:
+                result["replacement_action"] = action_snapshot(replacement)
+            action.result = result
+            action.save(update_fields=("result", "updated_at"))
+            shortage_error = _shortage_error(action)
+        else:
+            action = CartAction.objects.create(
+                owner_key=owner_key,
+                dialog_id=request_values["dialog_id"],
+                message_id=request_values["message_id"],
+                message_version=request_values["message_version"],
+                cart=cart,
+                expected_cart_version=cart.version,
+                product_id=request_values["product_id"],
+                offer_id="",
+                quantity=request_values["quantity"],
+                unit_price=detail_values["unit_price"],
+                currency=detail_values["currency"],
+                price_version=detail_values["price_version"],
+                pricing_context=detail_values["pricing_context"],
+                product_snapshot=detail_values["product_snapshot"],
+                expires_at=expires_at,
+            )
+    if shortage_error is not None:
+        raise shortage_error
     return action, True
 
 
@@ -406,18 +569,14 @@ def _replacement_for_stale(
         if detail_values is None:
             return None
         cart = Cart.objects.select_for_update().get(pk=action.cart_id)
+        if not _align_empty_cart_currency(cart, detail_values["currency"]):
+            return None
         available_to_add = detail_values["stock"] - _active_quantity(
             cart, action.product_id, action.offer_id
         )
-        sales_rules = detail_values["pricing_context"]["sales_rules"]
-        increment = lcm(sales_rules["step"], sales_rules["multiple"])
-        quantity = min(
-            action.quantity,
-            max(available_to_add, 0),
-            sales_rules["maximum"],
-        )
-        quantity -= quantity % increment
-        if quantity < sales_rules["minimum"]:
+        sales_rules = _sales_rules(detail_values)
+        quantity = _maximum_valid_quantity(min(action.quantity, available_to_add), sales_rules)
+        if quantity == 0:
             return None
         CartAction.objects.filter(
             owner_key=owner_key,
@@ -480,6 +639,11 @@ def _mutate_fixture(action_id: Any, owner_key: str) -> dict[str, Any]:
             }:
                 raise StaleCartCondition() from exc
             raise
+        if (
+            cart.currency != action.currency
+            or cart.currency != detail_values["currency"]
+        ):
+            raise StaleCartCondition(detail_values)
         if cart.version != action.expected_cart_version:
             raise StaleCartCondition(detail_values)
         if (
@@ -489,13 +653,8 @@ def _mutate_fixture(action_id: Any, owner_key: str) -> dict[str, Any]:
             or detail_values["pricing_context"] != action.pricing_context
         ):
             raise StaleCartCondition(detail_values)
-        sales_rules = detail_values["pricing_context"]["sales_rules"]
-        if (
-            action.quantity < sales_rules["minimum"]
-            or action.quantity > sales_rules["maximum"]
-            or action.quantity % sales_rules["step"] != 0
-            or action.quantity % sales_rules["multiple"] != 0
-        ):
+        sales_rules = _sales_rules(detail_values)
+        if not _quantity_is_valid(action.quantity, sales_rules):
             raise StaleCartCondition(detail_values)
         item = CartItem.objects.filter(
             cart=cart, product_id=action.product_id, offer_id=action.offer_id
