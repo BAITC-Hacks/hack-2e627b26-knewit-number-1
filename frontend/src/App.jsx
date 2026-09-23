@@ -655,6 +655,9 @@ function AnalogComparisonCard({ comparison, language }) {
   const verifiedAt = analogAvailability.verified_at ?? analogPrice.verified_at ?? analogRaw.verified_at;
   const matches = Array.isArray(comparison?.matching_parameters) ? comparison.matching_parameters : [];
   const differences = Array.isArray(comparison?.differences) ? comparison.differences : [];
+  const unverified = Array.isArray(comparison?.unverified_parameters)
+    ? comparison.unverified_parameters
+    : [];
 
   return (
     <article className="analog-card" aria-label={`${copy.comparison}: ${displayProductValue(analog.name, language)}`}>
@@ -733,6 +736,18 @@ function AnalogComparisonCard({ comparison, language }) {
           <p className="analog-missing">{copy.infoMissing}</p>
         )}
       </section>
+      {unverified.length > 0 && (
+        <section className="analog-section analog-section--warning" aria-label={normalizeLanguage(language) === "kk" ? "Тексерілмеген параметрлер" : "Непроверенные параметры"}>
+          <h4>{normalizeLanguage(language) === "kk" ? "Тексерілмеген параметры" : "Непроверенные параметры"}</h4>
+          <ul className="analog-match-list">
+            {unverified.map((parameter) => (
+              <li key={parameter}>
+                <span>{analogParameterLabel(parameter, language)}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      )}
     </article>
   );
 }

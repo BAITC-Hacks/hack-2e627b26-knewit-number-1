@@ -117,6 +117,61 @@ class DialogToolRegistryTests(SimpleTestCase):
         self.assertIn("price", data["product"])
         self.assertIn("availability", data["product"])
 
+    def test_zero_sellable_stock_runs_analog_fallback(self):
+        source = {
+            "id": PRODUCT_ID,
+            "name": "Unavailable lamp",
+            "price": 999,
+            "availability": {"status": "unavailable", "sellable_quantity": 0},
+            "properties": {"CATEGORY": "lamp", "ANALOG_GROUP": "LIGHT-1", "POWER": "18W"},
+        }
+        self.index_path.write_text(json.dumps({"items": [source]}), encoding="utf-8")
+
+        class Provider:
+            def get_product(self, product_id):
+                return source
+
+        with patch(
+            "dialog.tools.find_analogs",
+            return_value={
+                "matrix": "lighting-v1",
+                "status": "no_compatible_analogs",
+                "manager_review_required": False,
+                "results": [],
+                "count": 0,
+            },
+        ) as find_mock:
+            registry = DialogToolRegistry(
+                index_path=self.index_path,
+                provider_factory=Provider,
+            )
+            result = registry.execute("get_product", {"product_id": PRODUCT_ID})
+
+        find_mock.assert_called_once_with(PRODUCT_ID, self.index_path, 5)
+        self.assertEqual(result["untrusted_data"]["fallback_reason"], "zero_sellable_stock")
+        self.assertEqual(result["untrusted_data"]["analog_fallback"]["count"], 0)
+
+    def test_zero_sellable_stock_escalates_for_unsupported_category(self):
+        source = {
+            "id": PRODUCT_ID,
+            "name": "Unavailable cable",
+            "price": 999,
+            "availability": {"status": "unavailable", "sellable_quantity": 0},
+            "properties": {"CATEGORY": "cable", "ANALOG_GROUP": "CABLE-1"},
+        }
+        self.index_path.write_text(json.dumps({"items": [source]}), encoding="utf-8")
+
+        class Provider:
+            def get_product(self, product_id):
+                return source
+
+        registry = DialogToolRegistry(index_path=self.index_path, provider_factory=Provider)
+        result = registry.execute("get_product", {"product_id": PRODUCT_ID})["untrusted_data"]
+
+        fallback = result["analog_fallback"]
+        self.assertTrue(fallback["manager_review_required"])
+        self.assertEqual(fallback["analogs"], [])
+
     def test_unknown_tool_and_unknown_arguments_are_rejected(self):
         with self.assertRaises(ToolValidationError):
             self.registry.execute("http_get", {"url": "https://example.test"})

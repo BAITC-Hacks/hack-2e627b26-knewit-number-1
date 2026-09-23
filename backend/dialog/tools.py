@@ -334,13 +334,27 @@ class DialogToolRegistry:
         product = _detail(self._provider_factory().get_product(product_id))
         if product.get("id") != product_id:
             raise ToolExecutionError("catalog returned a different product")
-        return {
+        result = {
             "source": "catalog_detail_api",
             "source_ref": f"/api/products/detail?id={product_id}",
             "product": product,
             "price_verified": "price" in product and product.get("price") is not None,
             "availability_verified": isinstance(product.get("availability"), dict),
         }
+        availability = product.get("availability")
+        # A zero sellable stock is an explicit absence signal. Do not rely on
+        # the model to remember the analog fallback: run the same guarded
+        # compatibility flow server-side and expose its result as data.
+        if (
+            isinstance(availability, dict)
+            and availability.get("status") == "unavailable"
+            and availability.get("sellable_quantity") == 0
+        ):
+            result["analog_fallback"] = self._tool_find_analogs(
+                {"product_id": product_id, "limit": MAX_TOOL_RESULTS}
+            )
+            result["fallback_reason"] = "zero_sellable_stock"
+        return result
 
     def _tool_find_analogs(self, arguments: Any) -> dict[str, Any]:
         values = _object(arguments, required={"product_id", "limit"})

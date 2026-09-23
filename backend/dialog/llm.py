@@ -630,6 +630,45 @@ def compose_message(
                 products_by_id[product["id"]] = product
                 product_sources[product["id"]] = "catalog_detail_api"
                 sources.append({"type": "catalog_detail", "url": data.get("source_ref")})
+            # get_product may carry a deterministic zero-stock fallback. It
+            # is intentionally consumed here instead of asking the model to
+            # infer that an unavailable product needs another tool call.
+            fallback = data.get("analog_fallback")
+            if isinstance(fallback, dict):
+                if fallback.get("manager_review_required"):
+                    analog_policies.append(
+                        {
+                            "type": "analog_policy",
+                            "source": "compatibility_matrix",
+                            "matrix": fallback.get("matrix"),
+                            "status": fallback.get("status"),
+                            "manager_required": True,
+                        }
+                    )
+                for analog in fallback.get("analogs", []):
+                    if not isinstance(analog, dict):
+                        continue
+                    analog_product = analog.get("product")
+                    if not isinstance(analog_product, dict) or not isinstance(analog_product.get("id"), int):
+                        continue
+                    analog_id = analog_product["id"]
+                    products_by_id[analog_id] = analog_product
+                    product_sources[analog_id] = "catalog_detail_api"
+                    analog_explanations[analog_id] = sanitize_text(analog.get("explanation", ""))
+                    source_product = fallback.get("source_product")
+                    comparison = analog.get("comparison")
+                    if isinstance(source_product, dict) and isinstance(comparison, dict):
+                        analog_comparisons[analog_id] = sanitize_catalog_payload(
+                            {
+                                "source_product": source_product,
+                                "analog": analog_product,
+                                "why_fits": analog.get("explanation", ""),
+                                "matching_parameters": comparison.get("matched", []),
+                                "differences": comparison.get("differences", []),
+                                "unverified_parameters": comparison.get("unverified", []),
+                            }
+                        )
+                    sources.append({"type": "catalog_detail", "url": analog.get("source_ref")})
         elif item.name == "find_analogs":
             if data.get("manager_review_required"):
                 analog_policies.append(
@@ -659,6 +698,7 @@ def compose_message(
                                 "why_fits": analog.get("explanation", ""),
                                 "matching_parameters": comparison.get("matched", []),
                                 "differences": comparison.get("differences", []),
+                                "unverified_parameters": comparison.get("unverified", []),
                             }
                         )
                     sources.append({"type": "catalog_detail", "url": analog.get("source_ref")})
