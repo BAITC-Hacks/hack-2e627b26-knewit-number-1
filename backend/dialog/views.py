@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+import json
 import re
+import time
 import uuid
 from typing import Any
 
 from django.conf import settings
-from django.http import HttpRequest, JsonResponse
+from django.http import HttpRequest, JsonResponse, StreamingHttpResponse
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from cart.errors import CartApiError
 from cart.service import action_snapshot, create_action, owner_key_for_session
 from catalog.search import SearchIndexError, search_catalog, semantic_search_catalog
 from catalog.safety import sanitize_catalog_payload, sanitize_text
+from config.observability import observe_latency, record_event, record_metric
+from dialog.llm import (
+    LLMError,
+    OpenAIResponsesOrchestrator,
+    PROCESSING_TOKEN_RU,
+    llm_is_configured,
+)
 from knowledge_base.engine import answer_query
 
 
@@ -104,6 +113,10 @@ def _search_answer(text: str) -> tuple[str, list[dict[str, Any]]]:
     return f"Нашёл {len(products)} вариант(а). Уточните, какой товар использовать дальше.", products
 
 
+def _run_llm(history: list[dict[str, Any]]) -> dict[str, Any]:
+    return OpenAIResponsesOrchestrator().run(history).message
+
+
 def _make_cart_proposal(request: HttpRequest, dialog: dict[str, Any], product: dict[str, Any], quantity: int) -> dict[str, Any] | None:
     if request.session.session_key is None:
         request.session.create()
@@ -144,13 +157,28 @@ def _process(request: HttpRequest, dialog: dict[str, Any], text: str) -> dict[st
             "resolved_reference": {"product_id": reference["id"]},
             "products": [reference],
         }
+    if llm_is_configured():
+        try:
+            return _run_llm(dialog.get("history", []))
+        except LLMError as exc:
+            # Controlled degradation keeps catalog/KB answers available. Never
+            # return an upstream body, API key, or prompt content to the client.
+            record_metric("llm_degraded_total")
+            record_event(
+                "llm.orchestration.completed",
+                status="degraded",
+                error_code=exc.code,
+                retryable=exc.retryable,
+            )
     content, products = _search_answer(text)
-    return {"content": sanitize_text(content), "products": products}
+    response = {"content": sanitize_text(content), "products": products}
+    if llm_is_configured():
+        response["degraded"] = True
+        response["degradation_reason"] = "llm_unavailable"
+    return response
 
 
 def _json_body(request: HttpRequest) -> dict[str, Any]:
-    import json
-
     try:
         body = json.loads(request.body.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -158,6 +186,29 @@ def _json_body(request: HttpRequest) -> dict[str, Any]:
     if not isinstance(body, dict):
         raise ValueError("Request body must be a JSON object")
     return body
+
+
+def _validated_message(request: HttpRequest, dialog: dict[str, Any]) -> str:
+    body = _json_body(request)
+    text = body.get("text")
+    if not isinstance(text, str) or not text.strip() or len(text) > MAX_MESSAGE_LENGTH:
+        raise ValueError("text must be a non-empty string up to 1200 characters")
+    if body.get("dialog_id") and body["dialog_id"] != dialog["dialog_id"]:
+        raise ValueError("dialog_id does not match the current session dialog")
+    return text.strip()
+
+
+def _append_user_message(dialog: dict[str, Any], text: str) -> dict[str, Any]:
+    dialog["state"] = "processing"
+    dialog["version"] += 1
+    user_message = {
+        "id": uuid.uuid4().hex,
+        "role": "user",
+        "content": text,
+        "state": "sent",
+    }
+    dialog["history"].append(user_message)
+    return user_message
 
 
 @require_GET
@@ -170,17 +221,9 @@ def dialog_state(request: HttpRequest) -> JsonResponse:
 def dialog_message(request: HttpRequest) -> JsonResponse:
     dialog = _get_dialog(request)
     try:
-        body = _json_body(request)
-        text = body.get("text")
-        if not isinstance(text, str) or not text.strip() or len(text) > MAX_MESSAGE_LENGTH:
-            raise ValueError("text must be a non-empty string up to 1200 characters")
-        if body.get("dialog_id") and body["dialog_id"] != dialog["dialog_id"]:
-            raise ValueError("dialog_id does not match the current session dialog")
-        dialog["state"] = "processing"
-        dialog["version"] += 1
-        user_message = {"id": uuid.uuid4().hex, "role": "user", "content": text.strip(), "state": "sent"}
-        dialog["history"].append(user_message)
-        response = _process(request, dialog, text.strip())
+        text = _validated_message(request, dialog)
+        _append_user_message(dialog, text)
+        response = _process(request, dialog, text)
         assistant_message = {"id": uuid.uuid4().hex, "role": "assistant", "state": "done", **response}
         dialog["history"].append(assistant_message)
         dialog["state"] = "done"
@@ -190,6 +233,80 @@ def dialog_message(request: HttpRequest) -> JsonResponse:
         dialog["state"] = "error"
         _save_dialog(request, dialog)
         return JsonResponse({"dialog_id": dialog["dialog_id"], "state": "error", "retryable": isinstance(exc, SearchIndexError), "error": {"code": "dialog_error", "message": str(exc)}}, status=400 if isinstance(exc, ValueError) else 503)
+
+
+def _sse(event: str, payload: dict[str, Any]) -> str:
+    data = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), default=str)
+    return f"event: {event}\ndata: {data}\n\n"
+
+
+def _text_chunks(value: Any, size: int = 160):
+    text = str(value or "")
+    for offset in range(0, len(text), size):
+        yield text[offset : offset + size]
+
+
+@require_POST
+def dialog_message_stream(request: HttpRequest) -> StreamingHttpResponse | JsonResponse:
+    dialog = _get_dialog(request)
+    try:
+        text = _validated_message(request, dialog)
+    except ValueError as exc:
+        return JsonResponse(
+            {
+                "dialog_id": dialog["dialog_id"],
+                "state": "error",
+                "retryable": False,
+                "error": {"code": "dialog_error", "message": str(exc)},
+            },
+            status=400,
+        )
+
+    _append_user_message(dialog, text)
+    _save_dialog(request, dialog)
+    stream_started = time.perf_counter()
+
+    def events():
+        # Emit a visible token before any upstream call so the UI can render
+        # progress immediately while catalog/knowledge tools are running.
+        yield _sse("state", {"dialog_id": dialog["dialog_id"], "state": "processing"})
+        observe_latency("dialog_time_to_first_token", (time.perf_counter() - stream_started) * 1000)
+        record_metric("dialog_streams_total")
+        yield _sse("delta", {"phase": "progress", "text": PROCESSING_TOKEN_RU})
+        try:
+            response = _process(request, dialog, text)
+            assistant_message = {
+                "id": uuid.uuid4().hex,
+                "role": "assistant",
+                "state": "done",
+                **response,
+            }
+            dialog["history"].append(assistant_message)
+            dialog["state"] = "done"
+            _save_dialog(request, dialog)
+            request.session.save()
+            for chunk in _text_chunks(assistant_message.get("content")):
+                yield _sse("delta", {"phase": "answer", "text": chunk})
+            yield _sse("message", assistant_message)
+            yield _sse("done", {"dialog_id": dialog["dialog_id"], "state": "done"})
+        except (ValueError, SearchIndexError) as exc:
+            dialog["state"] = "error"
+            _save_dialog(request, dialog)
+            request.session.save()
+            yield _sse(
+                "error",
+                {
+                    "code": "dialog_error",
+                    "message": str(exc),
+                    "retryable": isinstance(exc, SearchIndexError),
+                },
+            )
+
+    response = StreamingHttpResponse(events(), content_type="text/event-stream; charset=utf-8")
+    response["Cache-Control"] = "no-cache, no-transform"
+    response["X-Accel-Buffering"] = "no"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 @require_POST
