@@ -26,4 +26,3 @@ class KnowledgeEntry(models.Model):
             models.Index(fields=("intent", "is_current", "published")),
             models.Index(fields=("status", "is_current")),
         ]
-

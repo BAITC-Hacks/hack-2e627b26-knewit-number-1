@@ -9,6 +9,7 @@ urlpatterns = [
     path("", include("knowledge_base.urls")),
     path("", include("dialog.urls")),
     path("", include("catalog.urls")),
+    path("", include("assistant.urls")),
     path("metrics", metrics_response, name="metrics"),
     path("ready", readiness_response, name="readiness"),
 ]

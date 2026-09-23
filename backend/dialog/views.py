@@ -21,6 +21,7 @@ from dialog.llm import (
     PROCESSING_TOKEN_RU,
     llm_is_configured,
 )
+from catalog.providers.fixture import PRODUCTS
 from knowledge_base.engine import answer_query
 
 
@@ -107,6 +108,33 @@ def _search_answer(text: str) -> tuple[str, list[dict[str, Any]]]:
         result = search_catalog(text, settings.CATALOG_INDEX_PATH, settings.CATALOG_SEARCH_MAX_RESULTS)
     except ValueError:
         result = semantic_search_catalog(text, settings.CATALOG_INDEX_PATH, settings.CATALOG_SEARCH_MAX_RESULTS)
+    except SearchIndexError:
+        # The public search route correctly remains unavailable until its full
+        # persisted index has been synchronized.  The fixture chat, however,
+        # must stay usable immediately after `migrate` for the local demo and
+        # tests.  This bounded fallback is never used with the live provider.
+        if settings.CATALOG_PROVIDER != "fixture":
+            raise
+        terms = [term for term in re.findall(r"[\w]+", text.casefold()) if len(term) > 1]
+        matches = []
+        for product in PRODUCTS:
+            searchable = " ".join(
+                [
+                    str(product.get("name") or ""),
+                    str(product.get("article") or ""),
+                    str((product.get("properties") or {}).get("CATEGORY") or ""),
+                    " ".join((product.get("properties") or {}).get("SEARCH_ALIASES") or []),
+                ]
+            ).casefold()
+            score = sum(term in searchable for term in terms)
+            if score:
+                matches.append((score, int(product["id"]), product))
+        matches.sort(key=lambda candidate: (-candidate[0], candidate[1]))
+        result = {
+            "query": text,
+            "mode": "fixture_fallback",
+            "results": [item for _, _, item in matches[: settings.CATALOG_SEARCH_MAX_RESULTS]],
+        }
     products = [sanitize_catalog_payload(item) for item in result.get("results", []) if isinstance(item, dict)]
     if not products:
         return "Не нашёл подходящую позицию в локальном индексе. Уточните артикул, назначение или характеристику.", []

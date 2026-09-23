@@ -20,7 +20,20 @@ from config.observability import record_event, record_metric, safe_identifier
 from cart.models import Cart, CartAction, CartItem, CartMutation
 
 
-CONFIRMATION_ALLOWLIST = frozenset({"да", "подтверждаю", "добавить в корзину"})
+# These phrases are intentionally exact.  A cart mutation still requires one
+# active, server-side proposal, so adding another language here does not make a
+# free-form chat message capable of changing a cart by itself.
+CONFIRMATION_ALLOWLIST = frozenset(
+    {
+        "да",
+        "подтверждаю",
+        "добавить в корзину",
+        "иә",
+        "растаймын",
+        "себетке қосу",
+        "себетке қосыңыз",
+    }
+)
 
 CART_ACTION_SCHEMA = {
     "type": "object",
@@ -524,6 +537,36 @@ def _run_with_database_retry(operation):
 
 def create_action(owner_key: str, payload: dict[str, Any]) -> tuple[CartAction, bool]:
     return _run_with_database_retry(lambda: _create_action_once(owner_key, payload))
+
+
+def expire_proposed_actions(owner_key: str, dialog_id: Any, *, reason: str) -> list[dict[str, Any]]:
+    """Expire every still-confirmable proposal for one dialog.
+
+    This is deliberately separate from confirmation: callers can invalidate a
+    proposal (for example, after a language switch) but cannot mutate a cart.
+    The returned snapshots describe the expired proposals only and contain no
+    replacement action id.
+    """
+
+    normalized_dialog = _validate_identifier(dialog_id, "dialog_id")
+    if not isinstance(reason, str) or not reason or len(reason) > 64:
+        raise ValueError("reason must be a short non-empty string")
+
+    with transaction.atomic():
+        actions = list(
+            CartAction.objects.select_for_update()
+            .filter(
+                owner_key=owner_key,
+                dialog_id=normalized_dialog,
+                status=CartAction.Status.PROPOSED,
+            )
+            .order_by("created_at")
+        )
+        for action in actions:
+            action.status = CartAction.Status.EXPIRED
+            action.failure_code = reason
+            action.save(update_fields=("status", "failure_code", "updated_at"))
+        return [action_snapshot(action) for action in actions]
 
 
 def _saved_success(action: CartAction, mutation: CartMutation | None = None) -> dict[str, Any]:

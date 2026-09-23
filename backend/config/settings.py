@@ -86,7 +86,16 @@ CART_CURRENCY = "KZT"
 CART_URL = "/demo/cart/"
 CART_MAX_QUANTITY = max(1, int(os.environ.get("CART_MAX_QUANTITY", "10000")))
 
+# The chat is disabled until a deployment explicitly supplies an OpenAI key and
+# model.  Keeping this opt-in prevents a local demo from accidentally sending
+# customer messages to an external service.
+ASSISTANT_LLM_PROVIDER = os.environ.get("ASSISTANT_LLM_PROVIDER", "disabled").strip().lower()
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY", "")
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "").strip()
+OPENAI_TIMEOUT_SECONDS = min(30.0, max(1.0, float(os.environ.get("OPENAI_TIMEOUT_SECONDS", "12"))))
+
 CATALOG_PROVIDER = os.environ.get("CATALOG_PROVIDER", "fixture").strip().lower()
+CATALOG_DEFAULT_CURRENCY = os.environ.get("CATALOG_DEFAULT_CURRENCY", "KZT").strip() or None
 EKT_API_BASE_URL = os.environ.get("EKT_API_BASE_URL", "https://ekt.kz/api").rstrip("/")
 EKT_API_USERNAME = os.environ.get("EKT_API_USERNAME", "")
 EKT_API_PASSWORD = os.environ.get("EKT_API_PASSWORD", "")
