@@ -5,6 +5,7 @@ from dialog import views
 
 urlpatterns = [
     path("api/dialog", views.dialog_state, name="dialog-state"),
+    path("api/dialog/uploads", views.dialog_upload, name="dialog-upload"),
     path("api/dialog/messages", views.dialog_message, name="dialog-message"),
     path("api/dialog/messages/stream", views.dialog_message_stream, name="dialog-message-stream"),
     path("api/dialog/messages/<str:message_id>/retry", views.dialog_retry, name="dialog-retry"),

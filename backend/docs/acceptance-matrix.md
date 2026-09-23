@@ -26,7 +26,7 @@ has a result/evidence reference. The sample data is
 | AT-015 | FR-CHAT-006, SEC-1-2 → Basic Auth request | secret redaction fixture | secret absent |
 | AT-016 | FR-CART-007, API-9 → invalid input | cart validation fixtures | rejected, no side effect |
 | AT-017 | FR-KB-001-004 → payment question | knowledge-base-v1 | published answer |
-| AT-018 | FR-FILE-003-004 → macro/bad signature | file safety fixtures | safely rejected |
+| AT-018 | FR-FILE-003-004 → macro/bad signature | file safety fixtures | safely rejected (`dialog.tests.test_attachments`) |
 | AT-019 | NFR-13.3 → 320px viewport | viewport-320 | no horizontal overflow |
 | AT-020 | NFR-13.4 → keyboard navigation | keyboard-only | focus path available |
 | AT-021 | FR-CHAT-002 → second reference | dialog-context-v1 | current context resolved |

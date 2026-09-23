@@ -43,7 +43,12 @@ class ApiGatewayMiddleware:
             content_length = int(request.META.get("CONTENT_LENGTH") or 0)
         except (TypeError, ValueError):
             content_length = 0
-        if content_length > settings.API_MAX_BODY_BYTES:
+        body_limit = (
+            settings.ATTACHMENT_MAX_REQUEST_BYTES
+            if request.path == "/api/dialog/uploads"
+            else settings.API_MAX_BODY_BYTES
+        )
+        if content_length > body_limit:
             return JsonResponse(
                 {"error": {"code": "request_too_large", "message": "Request body is too large"}},
                 status=413,

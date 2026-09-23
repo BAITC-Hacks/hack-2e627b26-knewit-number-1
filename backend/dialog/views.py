@@ -15,6 +15,7 @@ from cart.service import action_snapshot, create_action, owner_key_for_session
 from catalog.search import SearchIndexError, search_catalog, semantic_search_catalog
 from catalog.safety import sanitize_catalog_payload, sanitize_text
 from config.observability import observe_latency, record_event, record_metric
+from dialog.attachments import AttachmentError, extract_attachment
 from dialog.llm import (
     LLMError,
     OpenAIResponsesOrchestrator,
@@ -54,7 +55,13 @@ def _welcome() -> dict[str, Any]:
 
 
 def _new_dialog() -> dict[str, Any]:
-    return {"dialog_id": uuid.uuid4().hex, "version": 0, "state": "idle", "history": [_welcome()]}
+    return {
+        "dialog_id": uuid.uuid4().hex,
+        "version": 0,
+        "state": "idle",
+        "history": [_welcome()],
+        "attachments": {},
+    }
 
 
 def _get_dialog(request: HttpRequest) -> dict[str, Any]:
@@ -76,6 +83,8 @@ def _get_dialog(request: HttpRequest) -> dict[str, Any]:
         if changed:
             request.session["dialog_context"] = dialog
             request.session.modified = True
+    if not isinstance(dialog.get("attachments"), dict):
+        dialog["attachments"] = {}
     return dialog
 
 
@@ -160,8 +169,16 @@ def _search_answer(text: str) -> tuple[str, list[dict[str, Any]]]:
     return f"Нашёл {len(products)} вариант(а). Уточните, какой товар использовать дальше.", products
 
 
-def _run_llm(history: list[dict[str, Any]]) -> dict[str, Any]:
-    return OpenAIResponsesOrchestrator().run(history).message
+def _run_llm(history: list[dict[str, Any]], attachments: dict[str, Any]) -> dict[str, Any]:
+    enriched_history: list[dict[str, Any]] = []
+    for message in history:
+        item = dict(message)
+        attachment_id = item.get("attachment_id")
+        attachment = attachments.get(attachment_id) if isinstance(attachment_id, str) else None
+        if isinstance(attachment, dict):
+            item["attachment_context"] = attachment.get("text", "")
+        enriched_history.append(item)
+    return OpenAIResponsesOrchestrator().run(enriched_history).message
 
 
 def _make_cart_proposal(request: HttpRequest, dialog: dict[str, Any], product: dict[str, Any], quantity: int) -> dict[str, Any] | None:
@@ -184,7 +201,40 @@ def _make_cart_proposal(request: HttpRequest, dialog: dict[str, Any], product: d
     return action_snapshot(action)
 
 
-def _process(request: HttpRequest, dialog: dict[str, Any], text: str) -> dict[str, Any]:
+def _attachment_receipt(attachment: dict[str, Any]) -> dict[str, Any]:
+    metadata = attachment.get("metadata") if isinstance(attachment.get("metadata"), dict) else {}
+    text = attachment.get("text") if isinstance(attachment.get("text"), str) else ""
+    details = "Доступный текст извлечён и передан в безопасный контекст диалога." if text else "Текст для извлечения не найден; сохранены доступные метаданные."
+    return {
+        "content": f"Файл «{attachment.get('name', 'вложение')}» принят. {details}",
+        "attachment": _public_attachment(attachment),
+        "facts": [{"type": "attachment", "metadata": metadata}],
+    }
+
+
+def _process(
+    request: HttpRequest,
+    dialog: dict[str, Any],
+    text: str,
+    attachment: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if attachment is not None:
+        if llm_is_configured():
+            try:
+                return _run_llm(dialog.get("history", []), dialog.get("attachments", {}))
+            except LLMError as exc:
+                record_metric("llm_degraded_total")
+                record_event(
+                    "llm.orchestration.completed",
+                    status="degraded",
+                    error_code=exc.code,
+                    retryable=exc.retryable,
+                )
+                response = _attachment_receipt(attachment)
+                response["degraded"] = True
+                response["degradation_reason"] = "llm_unavailable"
+                return response
+        return _attachment_receipt(attachment)
     reference = _resolve_reference(dialog, text)
     quantity = _quantity(text)
     is_add = any(word in text.casefold() for word in ("добавь", "добавить"))
@@ -206,7 +256,7 @@ def _process(request: HttpRequest, dialog: dict[str, Any], text: str) -> dict[st
         }
     if llm_is_configured():
         try:
-            return _run_llm(dialog.get("history", []))
+            return _run_llm(dialog.get("history", []), dialog.get("attachments", {}))
         except LLMError as exc:
             # Controlled degradation keeps catalog/KB answers available. Never
             # return an upstream body, API key, or prompt content to the client.
@@ -235,7 +285,27 @@ def _json_body(request: HttpRequest) -> dict[str, Any]:
     return body
 
 
-def _validated_message(request: HttpRequest, dialog: dict[str, Any]) -> str:
+def _public_attachment(attachment: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: attachment[key]
+        for key in ("id", "name", "size", "type", "metadata")
+        if key in attachment
+    }
+
+
+def _validated_attachment(body: dict[str, Any], dialog: dict[str, Any]) -> dict[str, Any] | None:
+    attachment_id = body.get("attachment_id")
+    if attachment_id is None:
+        return None
+    if not isinstance(attachment_id, str) or not re.fullmatch(r"[a-f0-9]{32}", attachment_id):
+        raise ValueError("attachment_id is invalid")
+    attachment = dialog.get("attachments", {}).get(attachment_id)
+    if not isinstance(attachment, dict) or attachment.get("dialog_id") != dialog["dialog_id"]:
+        raise ValueError("attachment_id does not belong to the current dialog")
+    return attachment
+
+
+def _validated_message(request: HttpRequest, dialog: dict[str, Any]) -> tuple[str, dict[str, Any] | None]:
     body = _json_body(request)
     text = body.get("text")
     if not isinstance(text, str) or not text.strip() or len(text) > MAX_MESSAGE_LENGTH:
@@ -245,10 +315,12 @@ def _validated_message(request: HttpRequest, dialog: dict[str, Any]) -> str:
     text = text.strip()
     if contains_payment_data(text):
         raise PaymentDataDetected
-    return text
+    return text, _validated_attachment(body, dialog)
 
 
-def _append_user_message(dialog: dict[str, Any], text: str) -> dict[str, Any]:
+def _append_user_message(
+    dialog: dict[str, Any], text: str, attachment: dict[str, Any] | None = None
+) -> dict[str, Any]:
     if contains_payment_data(text):
         raise PaymentDataDetected
     dialog["state"] = "processing"
@@ -259,6 +331,9 @@ def _append_user_message(dialog: dict[str, Any], text: str) -> dict[str, Any]:
         "content": text,
         "state": "sent",
     }
+    if attachment is not None:
+        user_message["attachment_id"] = attachment["id"]
+        user_message["attachment"] = _public_attachment(attachment)
     dialog["history"].append(user_message)
     return user_message
 
@@ -269,13 +344,61 @@ def dialog_state(request: HttpRequest) -> JsonResponse:
     return JsonResponse({"dialog_id": dialog["dialog_id"], "state": dialog.get("state", "idle"), "history": dialog["history"]})
 
 
+def _attachment_error_response(exc: AttachmentError) -> JsonResponse:
+    return JsonResponse(
+        {"error": {"code": exc.code, "message": exc.message}},
+        status=exc.status_code,
+    )
+
+
+def _close_uploaded_files(files: list[Any]) -> None:
+    for uploaded in files:
+        close = getattr(uploaded, "close", None)
+        if callable(close):
+            close()
+
+
+@require_POST
+def dialog_upload(request: HttpRequest) -> JsonResponse:
+    dialog = _get_dialog(request)
+    files = request.FILES.getlist("file")
+    raw_dialog_id = request.POST.get("dialog_id")
+    if raw_dialog_id and raw_dialog_id != dialog["dialog_id"]:
+        _close_uploaded_files(files)
+        return JsonResponse(
+            {"error": {"code": "dialog_error", "message": "dialog_id does not match the current session dialog"}},
+            status=400,
+        )
+    if len(files) != 1:
+        _close_uploaded_files(files)
+        return JsonResponse(
+            {"error": {"code": "invalid_upload", "message": "Exactly one file must be uploaded"}},
+            status=400,
+        )
+    if len(dialog["attachments"]) >= settings.ATTACHMENT_MAX_STORED_PER_DIALOG:
+        _close_uploaded_files(files)
+        return JsonResponse(
+            {"error": {"code": "attachment_limit_exceeded", "message": "Too many attachments in the current dialog"}},
+            status=429,
+        )
+    try:
+        attachment = extract_attachment(files[0])
+    except AttachmentError as exc:
+        return _attachment_error_response(exc)
+    attachment["id"] = uuid.uuid4().hex
+    attachment["dialog_id"] = dialog["dialog_id"]
+    dialog["attachments"][attachment["id"]] = attachment
+    _save_dialog(request, dialog)
+    return JsonResponse({"attachment": _public_attachment(attachment)}, status=201)
+
+
 @require_POST
 def dialog_message(request: HttpRequest) -> JsonResponse:
     dialog = _get_dialog(request)
     try:
-        text = _validated_message(request, dialog)
-        _append_user_message(dialog, text)
-        response = _process(request, dialog, text)
+        text, attachment = _validated_message(request, dialog)
+        _append_user_message(dialog, text, attachment)
+        response = _process(request, dialog, text, attachment)
         assistant_message = {"id": uuid.uuid4().hex, "role": "assistant", "state": "done", **response}
         dialog["history"].append(assistant_message)
         dialog["state"] = "done"
@@ -314,7 +437,7 @@ def _text_chunks(value: Any, size: int = 160):
 def dialog_message_stream(request: HttpRequest) -> StreamingHttpResponse | JsonResponse:
     dialog = _get_dialog(request)
     try:
-        text = _validated_message(request, dialog)
+        text, attachment = _validated_message(request, dialog)
     except PaymentDataDetected:
         dialog["state"] = "blocked"
         _save_dialog(request, dialog)
@@ -338,7 +461,7 @@ def dialog_message_stream(request: HttpRequest) -> StreamingHttpResponse | JsonR
             status=400,
         )
 
-    _append_user_message(dialog, text)
+    _append_user_message(dialog, text, attachment)
     _save_dialog(request, dialog)
     stream_started = time.perf_counter()
 
@@ -350,7 +473,7 @@ def dialog_message_stream(request: HttpRequest) -> StreamingHttpResponse | JsonR
         record_metric("dialog_streams_total")
         yield _sse("delta", {"phase": "progress", "text": PROCESSING_TOKEN_RU})
         try:
-            response = _process(request, dialog, text)
+            response = _process(request, dialog, text, attachment)
             assistant_message = {
                 "id": uuid.uuid4().hex,
                 "role": "assistant",
@@ -399,7 +522,10 @@ def dialog_retry(request: HttpRequest, message_id: str) -> JsonResponse:
             {"dialog_id": dialog["dialog_id"], "state": "blocked", "retryable": False, "error": {"code": "payment_data_detected", "message": PAYMENT_DATA_MESSAGE}},
             status=400,
         )
-    request._body = __import__("json").dumps({"text": previous["content"], "dialog_id": dialog["dialog_id"]}).encode()
+    payload = {"text": previous["content"], "dialog_id": dialog["dialog_id"]}
+    if isinstance(previous.get("attachment_id"), str):
+        payload["attachment_id"] = previous["attachment_id"]
+    request._body = __import__("json").dumps(payload).encode()
     return dialog_message(request)
 
 
