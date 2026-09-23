@@ -13,6 +13,9 @@ from dialog.llm import (
     OpenAIResponsesOrchestrator,
     SAFE_REFUSAL_RU,
     ToolTrace,
+    _clarification_repeats_known_constraint,
+    _latest_user_catalog_identifiers,
+    _latest_user_message_has_catalog_identifier,
     compose_message,
     _history_input,
 )
@@ -117,6 +120,61 @@ class DialogToolRegistryTests(SimpleTestCase):
         self.assertIn("price", data["product"])
         self.assertIn("availability", data["product"])
 
+    def test_zero_sellable_stock_runs_analog_fallback(self):
+        source = {
+            "id": PRODUCT_ID,
+            "name": "Unavailable lamp",
+            "price": 999,
+            "availability": {"status": "unavailable", "sellable_quantity": 0},
+            "properties": {"CATEGORY": "lamp", "ANALOG_GROUP": "LIGHT-1", "POWER": "18W"},
+        }
+        self.index_path.write_text(json.dumps({"items": [source]}), encoding="utf-8")
+
+        class Provider:
+            def get_product(self, product_id):
+                return source
+
+        with patch(
+            "dialog.tools.find_analogs",
+            return_value={
+                "matrix": "lighting-v1",
+                "status": "no_compatible_analogs",
+                "manager_review_required": False,
+                "results": [],
+                "count": 0,
+            },
+        ) as find_mock:
+            registry = DialogToolRegistry(
+                index_path=self.index_path,
+                provider_factory=Provider,
+            )
+            result = registry.execute("get_product", {"product_id": PRODUCT_ID})
+
+        find_mock.assert_called_once_with(PRODUCT_ID, self.index_path, 5)
+        self.assertEqual(result["untrusted_data"]["fallback_reason"], "zero_sellable_stock")
+        self.assertEqual(result["untrusted_data"]["analog_fallback"]["count"], 0)
+
+    def test_zero_sellable_stock_escalates_for_unsupported_category(self):
+        source = {
+            "id": PRODUCT_ID,
+            "name": "Unavailable cable",
+            "price": 999,
+            "availability": {"status": "unavailable", "sellable_quantity": 0},
+            "properties": {"CATEGORY": "cable", "ANALOG_GROUP": "CABLE-1"},
+        }
+        self.index_path.write_text(json.dumps({"items": [source]}), encoding="utf-8")
+
+        class Provider:
+            def get_product(self, product_id):
+                return source
+
+        registry = DialogToolRegistry(index_path=self.index_path, provider_factory=Provider)
+        result = registry.execute("get_product", {"product_id": PRODUCT_ID})["untrusted_data"]
+
+        fallback = result["analog_fallback"]
+        self.assertTrue(fallback["manager_review_required"])
+        self.assertEqual(fallback["analogs"], [])
+
     def test_unknown_tool_and_unknown_arguments_are_rejected(self):
         with self.assertRaises(ToolValidationError):
             self.registry.execute("http_get", {"url": "https://example.test"})
@@ -138,7 +196,7 @@ class OpenAIOrchestratorTests(SimpleTestCase):
                         {
                             "id": PRODUCT_ID,
                             "name": "Demo lamp",
-                            "article": "DEMO-1",
+                            "article": "200300272_",
                             "description": "18W ceiling light",
                             "properties": {"CATEGORY": "lamp", "POWER": "18W"},
                             "data_source": "fixture",
@@ -205,6 +263,182 @@ class OpenAIOrchestratorTests(SimpleTestCase):
         self.assertTrue(all(payload["store"] is False for payload, _ in transport.payloads))
         self.assertFalse(
             any(tool["name"] == "http_get" for tool in transport.payloads[0][0]["tools"])
+        )
+
+    def test_article_turn_forces_catalog_search_before_any_clarification(self):
+        search_call = api_response(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call_search",
+                    "name": "search_catalog",
+                    "arguments": json.dumps(
+                        {"query": "200300272_", "mode": "exact_fuzzy", "limit": 5}
+                    ),
+                }
+            ]
+        )
+        completed = final_response(
+            response_kind="answer",
+            selected_product_ids=[PRODUCT_ID],
+            source_status="sourced",
+        )
+        transport = QueueTransport([search_call, completed])
+
+        self.orchestrator(transport).run(
+            [{"role": "user", "content": "200300272_"}]
+        )
+
+        self.assertEqual(
+            transport.payloads[0][0]["tool_choice"],
+            {"type": "function", "name": "search_catalog"},
+        )
+        self.assertEqual(transport.payloads[1][0]["tool_choice"], "auto")
+
+    def test_article_turn_rejects_search_with_a_different_query(self):
+        wrong_search_call = api_response(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call_search",
+                    "name": "search_catalog",
+                    "arguments": json.dumps(
+                        {"query": "автомат Legrand", "mode": "semantic", "limit": 5}
+                    ),
+                }
+            ]
+        )
+        with self.assertRaises(LLMProtocolError):
+            self.orchestrator(QueueTransport([wrong_search_call])).run(
+                [{"role": "user", "content": "200300272_"}]
+            )
+
+    def test_every_article_in_one_turn_requires_its_own_exact_search(self):
+        first_search = api_response(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call_first",
+                    "name": "search_catalog",
+                    "arguments": json.dumps(
+                        {"query": "027008", "mode": "exact_fuzzy", "limit": 5}
+                    ),
+                }
+            ]
+        )
+        second_search = api_response(
+            [
+                {
+                    "type": "function_call",
+                    "call_id": "call_second",
+                    "name": "search_catalog",
+                    "arguments": json.dumps(
+                        {"query": "200300272_", "mode": "exact_fuzzy", "limit": 5}
+                    ),
+                }
+            ]
+        )
+        completed = final_response(
+            response_kind="answer", selected_product_ids=[PRODUCT_ID], source_status="sourced"
+        )
+        transport = QueueTransport([first_search, second_search, completed])
+        self.orchestrator(transport, max_tool_rounds=1).run(
+            [{"role": "user", "content": "027008 и 200300272_"}]
+        )
+        self.assertEqual(
+            transport.payloads[1][0]["tool_choice"],
+            {"type": "function", "name": "search_catalog"},
+        )
+        self.assertEqual(
+            _latest_user_catalog_identifiers(
+                [{"role": "user", "content": "027008 и 200300272_"}]
+            ),
+            ["027008", "200300272_"],
+        )
+
+    def test_article_detection_accepts_catalog_suffix_but_not_voltage(self):
+        self.assertTrue(
+            _latest_user_message_has_catalog_identifier(
+                [{"role": "user", "content": "200300272_"}]
+            )
+        )
+        self.assertTrue(
+            _latest_user_message_has_catalog_identifier(
+                [{"role": "user", "content": "027008"}]
+            )
+        )
+        self.assertTrue(
+            _latest_user_message_has_catalog_identifier(
+                [{"role": "user", "content": "А123"}]
+            )
+        )
+        self.assertFalse(
+            _latest_user_message_has_catalog_identifier(
+                [{"role": "user", "content": "Нужен любой с напряжением 400В"}]
+            )
+        )
+
+    def test_repeated_known_constraint_is_rejected(self):
+        plan = {
+            "response_kind": "clarification",
+            "selected_product_ids": [],
+            "recommendation": None,
+            "recommendation_reason": None,
+            "clarifying_questions": ["Уточните, пожалуйста, тип автомата."],
+            "source_status": "missing",
+        }
+        history = [
+            {"role": "user", "content": "Нужен автомат Legrand на 160 А, 3 полюса"},
+            {"role": "user", "content": "модульный"},
+            {"role": "user", "content": "Нужен любой с напряжением 400В"},
+        ]
+        self.assertTrue(_clarification_repeats_known_constraint(plan, history))
+        with self.assertRaises(LLMProtocolError):
+            self.orchestrator(QueueTransport([final_response(**plan)])).run(history)
+
+    def test_repeated_article_is_rejected(self):
+        plan = {
+            "response_kind": "clarification",
+            "selected_product_ids": [],
+            "recommendation": None,
+            "recommendation_reason": None,
+            "clarifying_questions": ["Повторите артикул товара."],
+            "source_status": "missing",
+        }
+        self.assertTrue(
+            _clarification_repeats_known_constraint(
+                plan, [{"role": "user", "content": "200300272"}]
+            )
+        )
+
+    def test_repeated_brand_is_rejected_for_non_legrand_brand(self):
+        plan = {
+            "response_kind": "clarification",
+            "selected_product_ids": [],
+            "recommendation": None,
+            "recommendation_reason": None,
+            "clarifying_questions": ["Укажите производителя автомата."],
+            "source_status": "missing",
+        }
+        self.assertTrue(
+            _clarification_repeats_known_constraint(
+                plan, [{"role": "user", "content": "Нужен автомат IEK на 16 А"}]
+            )
+        )
+
+    def test_repeated_poles_are_rejected_for_latin_p_notation(self):
+        plan = {
+            "response_kind": "clarification",
+            "selected_product_ids": [],
+            "recommendation": None,
+            "recommendation_reason": None,
+            "clarifying_questions": ["Уточните количество полюсов."],
+            "source_status": "missing",
+        }
+        self.assertTrue(
+            _clarification_repeats_known_constraint(
+                plan, [{"role": "user", "content": "Нужен автомат 3P"}]
+            )
         )
 
     def test_payment_data_is_redacted_before_openai_payload(self):
