@@ -10,6 +10,7 @@ from django.middleware.csrf import get_token
 from django.views.decorators.http import require_GET, require_POST
 
 from cart.errors import CartApiError
+from config.observability import record_event, record_metric, safe_identifier
 from cart.service import (
     action_snapshot,
     cart_snapshot,
@@ -22,6 +23,9 @@ from cart.service import (
 
 
 def _error_response(error: CartApiError) -> JsonResponse:
+    record_metric("cart_errors_total")
+    record_metric(f"cart_errors_{error.code}_total")
+    record_event("cart.error", status_code=error.status_code, error_type=error.code)
     payload: dict[str, Any] = {
         "error": {"code": error.code, "message": error.message},
         **error.extra,
@@ -54,6 +58,16 @@ def _json_body(request: HttpRequest, *, allow_empty: bool = False) -> dict[str, 
 def cart_actions(request: HttpRequest) -> JsonResponse:
     try:
         action, created = create_action(_owner_key(request), _json_body(request))
+        record_metric("cart_proposals_total")
+        if not created:
+            record_metric("cart_proposal_replays_total")
+        record_event(
+            "cart.proposed",
+            action_id=safe_identifier(action.id),
+            product_id=action.product_id,
+            quantity=action.quantity,
+            replay=not created,
+        )
         return JsonResponse(action_snapshot(action), status=201 if created else 200)
     except CartApiError as exc:
         return _error_response(exc)
@@ -73,7 +87,16 @@ def cart_action_confirm(request: HttpRequest, action_id: str) -> JsonResponse:
                 "immutable_action",
                 "Confirmation body cannot change a cart proposal",
             )
-        return JsonResponse(confirm_action(_owner_key(request), parsed_action_id))
+        result = confirm_action(_owner_key(request), parsed_action_id)
+        record_metric("cart_confirmations_total")
+        if result.get("status") == "succeeded":
+            record_metric("cart_successes_total")
+        record_event(
+            "cart.confirmed",
+            action_id=safe_identifier(parsed_action_id),
+            status=result.get("status"),
+        )
+        return JsonResponse(result)
     except CartApiError as exc:
         return _error_response(exc)
 
@@ -82,19 +105,19 @@ def cart_action_confirm(request: HttpRequest, action_id: str) -> JsonResponse:
 def cart_action_confirm_text(request: HttpRequest) -> JsonResponse:
     try:
         payload = _json_body(request)
-        return JsonResponse(
-            confirm_text(
-                _owner_key(request),
-                payload.get("dialog_id"),
-                payload.get("text"),
-            )
-        )
+        result = confirm_text(_owner_key(request), payload.get("dialog_id"), payload.get("text"))
+        record_metric("cart_confirmations_total")
+        if result.get("status") == "succeeded":
+            record_metric("cart_successes_total")
+        record_event("cart.confirmed_text", status=result.get("status"))
+        return JsonResponse(result)
     except CartApiError as exc:
         return _error_response(exc)
 
 
 @require_GET
 def cart_detail(request: HttpRequest) -> JsonResponse:
+    record_metric("cart_reads_total")
     get_token(request)
     cart = get_or_create_cart(_owner_key(request))
     return JsonResponse(cart_snapshot(cart))

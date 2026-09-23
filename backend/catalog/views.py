@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from html import escape
@@ -9,6 +10,10 @@ from django.http import FileResponse, HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.http import require_GET
 
 from catalog.errors import CatalogError
+from catalog.analogs import find_analogs
+from catalog.safety import sanitize_catalog_payload
+from catalog.search import SearchIndexError, search_catalog, semantic_search_catalog
+from config.observability import add_stage, record_metric
 from catalog.providers import get_catalog_provider
 from catalog.providers.fixture import (
     FIXTURE_DATASET_VERSION,
@@ -19,10 +24,23 @@ from catalog.providers.fixture import (
 
 
 def _error_response(error: CatalogError, data_source: str) -> JsonResponse:
+    record_metric("catalog_errors_total")
+    record_metric(f"catalog_errors_{error.code}_total")
+    degraded = error.status_code in {502, 503, 504}
+    if degraded:
+        record_metric("catalog_degraded_responses_total")
     response = JsonResponse(
         {
             "error": {"code": error.code, "message": error.message},
             "data_source": data_source,
+            **(
+                {
+                    "data_freshness": "stale",
+                    "price_and_availability_current": False,
+                }
+                if degraded
+                else {}
+            ),
         },
         status=error.status_code,
     )
@@ -50,36 +68,100 @@ def _fixture_case(request: HttpRequest) -> str | None:
 @require_GET
 def products(request: HttpRequest) -> JsonResponse:
     provider: Any = None
+    started = time.perf_counter()
     try:
         provider = get_catalog_provider()
         page = _positive_int(request, "page", 1)
         per_page = _positive_int(request, "per_page", 20, maximum=100)
-        return JsonResponse(provider.list_products(page, per_page, _fixture_case(request)))
+        return JsonResponse(sanitize_catalog_payload(provider.list_products(page, per_page, _fixture_case(request))))
     except CatalogError as exc:
         return _error_response(exc, getattr(provider, "data_source", "unknown"))
+    finally:
+        add_stage("catalog_provider", started)
 
 
 @require_GET
 def product_detail(request: HttpRequest) -> JsonResponse:
     provider: Any = None
+    started = time.perf_counter()
     try:
         provider = get_catalog_provider()
         product_id = _positive_int(request, "id", 0)
-        return JsonResponse(provider.get_product(product_id, _fixture_case(request)))
+        return JsonResponse(sanitize_catalog_payload(provider.get_product(product_id, _fixture_case(request))))
     except CatalogError as exc:
         return _error_response(exc, getattr(provider, "data_source", "unknown"))
+    finally:
+        add_stage("catalog_provider", started)
+
+
+@require_GET
+def search(request: HttpRequest) -> JsonResponse:
+    query = request.GET.get("q", "")
+    if len(query) > 1200:
+        return JsonResponse({"error": {"code": "invalid_query", "message": "q is too long"}}, status=400)
+    started = time.perf_counter()
+    try:
+        result = search_catalog(query, settings.CATALOG_INDEX_PATH, settings.CATALOG_SEARCH_MAX_RESULTS)
+    except ValueError as exc:
+        return JsonResponse({"error": {"code": "invalid_query", "message": str(exc)}}, status=400)
+    except SearchIndexError as exc:
+        return JsonResponse({"error": {"code": "search_index_unavailable", "message": str(exc)}}, status=503)
+    finally:
+        add_stage("local_search", started)
+    record_metric("search_success_total" if result["results"] else "search_empty_total")
+    return JsonResponse(sanitize_catalog_payload(result))
+
+
+@require_GET
+def semantic_search(request: HttpRequest) -> JsonResponse:
+    query = request.GET.get("q", "")
+    if len(query) > 1200:
+        return JsonResponse({"error": {"code": "invalid_query", "message": "q is too long"}}, status=400)
+    started = time.perf_counter()
+    try:
+        result = semantic_search_catalog(query, settings.CATALOG_INDEX_PATH, settings.CATALOG_SEARCH_MAX_RESULTS)
+    except ValueError as exc:
+        return JsonResponse({"error": {"code": "invalid_query", "message": str(exc)}}, status=400)
+    except SearchIndexError as exc:
+        return JsonResponse({"error": {"code": "search_index_unavailable", "message": str(exc)}}, status=503)
+    finally:
+        add_stage("semantic_search", started)
+    record_metric("semantic_search_success_total" if result["results"] else "semantic_search_empty_total")
+    return JsonResponse(sanitize_catalog_payload(result))
+
+
+@require_GET
+def analogs(request: HttpRequest) -> JsonResponse:
+    raw_product_id = request.GET.get("id")
+    try:
+        product_id = int(raw_product_id or "0")
+        if product_id < 1:
+            raise ValueError
+        started = time.perf_counter()
+        try:
+            result = find_analogs(product_id, settings.CATALOG_INDEX_PATH, settings.CATALOG_SEARCH_MAX_RESULTS)
+        finally:
+            add_stage("analog_compatibility", started)
+    except ValueError:
+        return JsonResponse({"error": {"code": "invalid_product_id", "message": "id must be a positive integer"}}, status=400)
+    except KeyError:
+        return JsonResponse({"error": {"code": "product_not_found", "message": "Product was not found in the local index"}}, status=404)
+    except SearchIndexError as exc:
+        return JsonResponse({"error": {"code": "search_index_unavailable", "message": str(exc)}}, status=503)
+    record_metric("analogs_success_total" if result["results"] else "analogs_empty_total")
+    return JsonResponse(sanitize_catalog_payload(result))
 
 
 @require_GET
 def health(request: HttpRequest) -> JsonResponse:
     del request
-    provider = get_catalog_provider()
     payload: dict[str, Any] = {
         "status": "ok",
-        "catalog_provider": provider.data_source,
-        "data_source": provider.data_source,
+        "catalog_provider": settings.CATALOG_PROVIDER,
+        "data_source": settings.CATALOG_PROVIDER,
+        "service": "alive",
     }
-    if provider.data_source == "fixture":
+    if settings.CATALOG_PROVIDER == "fixture":
         payload.update(
             {
                 "fixture_version": FIXTURE_DATASET_VERSION,

@@ -21,17 +21,28 @@ ALLOWED_HOSTS = [
 
 ROOT_URLCONF = "config.urls"
 INSTALLED_APPS = [
+    "django.contrib.contenttypes",
+    "django.contrib.auth",
     "django.contrib.sessions",
     "django.contrib.staticfiles",
     "catalog",
     "cart",
+    "dialog",
+    "gateway",
+    "knowledge_base",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "gateway.middleware.ApiGatewayMiddleware",
+    "config.observability.ObservabilityMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
 ]
+
+API_RATE_LIMIT_PER_MINUTE = max(1, int(os.environ.get("API_RATE_LIMIT_PER_MINUTE", "1000")))
+API_MAX_BODY_BYTES = max(1024, int(os.environ.get("API_MAX_BODY_BYTES", "262144")))
 
 DATABASES = {
     "default": {
@@ -107,3 +118,18 @@ AVAILABILITY_STALE_AFTER_SECONDS = float(
     os.environ.get("AVAILABILITY_STALE_AFTER_SECONDS", "300")
 )
 FIXTURE_TIMEOUT_SECONDS = float(os.environ.get("FIXTURE_TIMEOUT_SECONDS", "3.1"))
+
+CATALOG_INDEX_PATH = Path(
+    os.environ.get("CATALOG_INDEX_PATH", str(BASE_DIR / "var" / "catalog_index.json"))
+)
+CATALOG_SYNC_STATUS_PATH = Path(
+    os.environ.get("CATALOG_SYNC_STATUS_PATH", str(BASE_DIR / "var" / "catalog_sync_status.json"))
+)
+CATALOG_SYNC_MAX_PAGES = int(os.environ.get("CATALOG_SYNC_MAX_PAGES", "1000"))
+CATALOG_SYNC_PER_PAGE = int(os.environ.get("CATALOG_SYNC_PER_PAGE", "100"))
+CATALOG_SYNC_INTERVAL_HOURS = float(os.environ.get("CATALOG_SYNC_INTERVAL_HOURS", "24"))
+CATALOG_SYNC_INCLUDE_DETAILS = os.environ.get("CATALOG_SYNC_INCLUDE_DETAILS", "false").lower() in {"1", "true", "yes"}
+CATALOG_SEARCH_MAX_RESULTS = max(1, int(os.environ.get("CATALOG_SEARCH_MAX_RESULTS", "5")))
+PROMPT_VERSION = os.environ.get("PROMPT_VERSION", "not_configured")
+MODEL_VERSION = os.environ.get("MODEL_VERSION", "not_configured")
+CATALOG_INDEX_VERSION = os.environ.get("CATALOG_INDEX_VERSION", "catalog-index-v1")

@@ -1,12 +1,32 @@
 from datetime import datetime, timedelta, timezone
+import json
+from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, override_settings
 
 from catalog.availability import calculate_availability
+from catalog.analogs import find_analogs
 from catalog.errors import CatalogConfigurationError, CatalogError, CatalogTransportError
+from catalog.index_sync import sync_catalog
 from catalog.providers.ekt import EktCatalogProvider
-from catalog.providers.fixture import FIXTURE_DATASET_VERSION, FIXTURE_SEED
+from catalog.providers.fixture import FIXTURE_DATASET_VERSION, FIXTURE_SEED, FixtureCatalogProvider
+from catalog.search import clear_index_cache, search_catalog, semantic_search_catalog
+
+
+@contextmanager
+def sync_test_paths():
+    root = Path(__file__).resolve().parents[2]
+    index_path = root / ".test_catalog_index.json"
+    status_path = root / ".test_catalog_sync_status.json"
+    for path in (index_path, status_path):
+        path.unlink(missing_ok=True)
+    try:
+        yield index_path, status_path
+    finally:
+        for path in (index_path, status_path):
+            path.unlink(missing_ok=True)
 
 
 @override_settings(CATALOG_PROVIDER="fixture", FIXTURE_TIMEOUT_SECONDS=0)
@@ -159,6 +179,37 @@ class FixtureCatalogApiTests(SimpleTestCase):
         self.assertEqual(image["Content-Type"], "image/svg+xml")
         self.assertEqual(product_page.status_code, 200)
         self.assertContains(product_page, "DEMO FIXTURE")
+
+    def test_request_id_is_returned_and_observability_endpoints_expose_metrics(self):
+        response = self.client.get("/api/products", headers={"X-Request-ID": "trace-test-1"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["X-Request-ID"], "trace-test-1")
+
+        metrics = self.client.get("/metrics")
+        self.assertEqual(metrics.status_code, 200)
+        body = metrics.json()
+        self.assertGreaterEqual(body["counters"]["http_requests_total"], 1)
+        self.assertIn("http_request", body["latency_ms"])
+
+    @override_settings(CATALOG_INDEX_PATH=Path(".definitely-missing-catalog-index.json"))
+    def test_readiness_reports_missing_index(self):
+        response = self.client.get("/ready")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["status"], "not_ready")
+        self.assertFalse(response.json()["checks"]["catalog_index"])
+
+    @override_settings(CATALOG_PROVIDER="invalid")
+    def test_health_is_liveness_and_does_not_require_provider(self):
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["service"], "alive")
+
+    def test_upstream_failure_marks_catalog_data_as_stale(self):
+        response = self.client.get("/api/products", {"fixture_case": "server_error"})
+        self.assertEqual(response.status_code, 503)
+        body = response.json()
+        self.assertEqual(body["data_freshness"], "stale")
+        self.assertFalse(body["price_and_availability_current"])
 
 
 class AvailabilityRuleTests(SimpleTestCase):
@@ -336,3 +387,272 @@ class ProviderSwitchTests(SimpleTestCase):
         response = self.client.get("/api/products")
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.json()["error"]["code"], "catalog_configuration_error")
+
+
+class CatalogIndexSyncTests(SimpleTestCase):
+    def test_fixture_catalog_is_fully_indexed_and_deduplicated(self):
+        provider = FixtureCatalogProvider(
+            sellable_store_ids=(1, 2, 3),
+            availability_rule_version="fixture-v1",
+            timeout_seconds=0,
+        )
+        with sync_test_paths() as (index_path, status_path):
+            result = sync_catalog(provider, index_path, status_path, max_pages=20, per_page=20)
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.stop_reason, "empty_page")
+            self.assertEqual(result.pages, 7)
+            self.assertEqual(result.products, 120)
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            ids = [item["id"] for item in index["items"]]
+            self.assertEqual(len(ids), 120)
+            self.assertEqual(len(set(ids)), 120)
+            self.assertEqual(ids, sorted(ids))
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(status["last_successful_products"], 120)
+            self.assertEqual(status["last_errors"], 0)
+
+    def test_repeated_page_ids_are_an_end_condition(self):
+        class RepeatingProvider:
+            data_source = "fixture"
+
+            def list_products(self, page, per_page):
+                del page, per_page
+                return {"items": [{"id": 1, "name": "one"}]}
+
+        with sync_test_paths() as (index_path, status_path):
+            result = sync_catalog(
+                RepeatingProvider(),
+                index_path,
+                status_path,
+                max_pages=10,
+                per_page=20,
+            )
+            self.assertTrue(result.success)
+            self.assertEqual(result.stop_reason, "repeated_page_ids")
+            self.assertEqual(result.pages, 2)
+            self.assertEqual(result.products, 1)
+
+    def test_max_pages_guard_does_not_replace_last_successful_index(self):
+        class EndlessProvider:
+            data_source = "fixture"
+
+            def list_products(self, page, per_page):
+                del per_page
+                return {"items": [{"id": page, "name": str(page)}]}
+
+        with sync_test_paths() as (index_path, status_path):
+            initial = sync_catalog(EndlessProvider(), index_path, status_path, max_pages=2, per_page=20)
+            self.assertFalse(initial.success)
+            self.assertEqual(initial.stop_reason, "max_pages_guard")
+            self.assertFalse(index_path.exists())
+
+    def test_include_details_enriches_index_for_semantic_search(self):
+        class DetailProvider:
+            data_source = "fixture"
+
+            def list_products(self, page, per_page):
+                del per_page
+                return {"items": [{"id": 1, "name": "Автомат"}]} if page == 1 else {"items": []}
+
+            def get_product(self, product_id):
+                return {
+                    "id": product_id,
+                    "description": "Защита цепи",
+                    "properties": {"NOMINAL_CURRENT": "16А"},
+                }
+
+        with sync_test_paths() as (index_path, status_path):
+            result = sync_catalog(
+                DetailProvider(),
+                index_path,
+                status_path,
+                max_pages=5,
+                per_page=20,
+                include_details=True,
+            )
+            payload = json.loads(index_path.read_text(encoding="utf-8"))
+
+        self.assertTrue(result.success)
+        self.assertTrue(payload["include_details"])
+        self.assertEqual(payload["items"][0]["properties"]["NOMINAL_CURRENT"], "16А")
+
+
+class CatalogSearchTests(SimpleTestCase):
+    def setUp(self):
+        clear_index_cache()
+
+    def tearDown(self):
+        clear_index_cache()
+
+    def write_index(self, index_path):
+        index_path.write_text(
+            json.dumps(
+                {
+                    "data_source": "fixture",
+                    "items": [
+                        {"id": 101, "article": "АВТ-001", "name": "Автоматический выключатель 16A"},
+                        {"id": 102, "article": "КАБ-002", "name": "Кабель силовой ВВГ"},
+                        {"id": 103, "article": "ЛАМ-003", "name": "Лампа светодиодная"},
+                    ],
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+
+    def test_exact_id_and_article_have_top_one_priority(self):
+        with sync_test_paths() as (index_path, _):
+            self.write_index(index_path)
+            by_id = search_catalog("101", index_path)
+            by_article = search_catalog("авт-001", index_path)
+
+        self.assertEqual(by_id["mode"], "exact")
+        self.assertEqual([item["id"] for item in by_id["results"]], [101])
+        self.assertEqual(by_article["mode"], "exact")
+        self.assertEqual([item["id"] for item in by_article["results"]], [101])
+
+    def test_fuzzy_name_returns_at_most_five_candidates(self):
+        with sync_test_paths() as (index_path, _):
+            self.write_index(index_path)
+            result = search_catalog("автоматический выключатл", index_path)
+
+        self.assertEqual(result["mode"], "fuzzy")
+        self.assertLessEqual(len(result["results"]), 5)
+
+
+class AnalogCompatibilityTests(SimpleTestCase):
+    def _write_index(self, path: Path) -> None:
+        items = [
+            {
+                "id": 1,
+                "name": "Светильник LED 18W",
+                "properties": {
+                    "CATEGORY": "светильник",
+                    "ANALOG_GROUP": "LIGHT-1",
+                    "POWER": "18W",
+                    "VOLTAGE": "220V",
+                    "IP_RATING": "IP44",
+                },
+            },
+            {
+                "id": 2,
+                "name": "Светильник LED 18W IP55",
+                "quantity": 5,
+                "stores": [{"id": 1, "name": "Алматы", "quantity": 5}],
+                "properties": {
+                    "CATEGORY": "светильник",
+                    "ANALOG_GROUP": "LIGHT-1",
+                    "POWER": "18W",
+                    "VOLTAGE": "220V",
+                    "IP_RATING": "IP55",
+                },
+            },
+            {
+                "id": 3,
+                "name": "Светильник LED 24W",
+                "quantity": 5,
+                "stores": [{"id": 1, "name": "Алматы", "quantity": 5}],
+                "properties": {
+                    "CATEGORY": "светильник",
+                    "ANALOG_GROUP": "LIGHT-1",
+                    "POWER": "24W",
+                    "VOLTAGE": "220V",
+                    "IP_RATING": "IP55",
+                },
+            },
+            {
+                "id": 4,
+                "name": "Кабель 18W",
+                "properties": {"CATEGORY": "кабель", "ANALOG_GROUP": "CABLE-1", "POWER": "18W"},
+            },
+            {
+                "id": 5,
+                "name": "Светильник LED 18W без sellable остатка",
+                "quantity": 5,
+                "stores": [{"id": 900, "name": "Брак", "quantity": 5}],
+                "properties": {
+                    "CATEGORY": "светильник",
+                    "ANALOG_GROUP": "LIGHT-1",
+                    "POWER": "18W",
+                    "VOLTAGE": "220V",
+                    "IP_RATING": "IP55",
+                },
+            },
+        ]
+        path.write_text(json.dumps({"items": items}, ensure_ascii=False), encoding="utf-8")
+
+    def test_lighting_matrix_rejects_critical_mismatch_and_explains_match(self):
+        with sync_test_paths() as (index_path, _):
+            self._write_index(index_path)
+            result = find_analogs(1, index_path)
+
+        self.assertEqual(result["matrix"], "lighting-v1")
+        self.assertEqual([item["id"] for item in result["results"]], [2])
+        self.assertEqual(result["rejected_candidates"], 1)
+        self.assertIn("power", result["results"][0]["compatibility"]["matched_parameters"])
+        self.assertIn("voltage", result["results"][0]["explanation"])
+        self.assertEqual(result["results"][0]["sellable_quantity"], 5)
+        self.assertIn("ranking", result["results"][0])
+        self.assertEqual(result["results"][0]["match_type"], "compatible_analog")
+        self.assertEqual(result["results"][0]["comparison"]["differences"][0]["parameter"], "ip_rating")
+
+    def test_unapproved_category_requires_manager_review(self):
+        with sync_test_paths() as (index_path, _):
+            self._write_index(index_path)
+            result = find_analogs(4, index_path)
+
+        self.assertEqual(result["status"], "manager_review_required")
+        self.assertTrue(result["manager_review_required"])
+        self.assertEqual(result["results"], [])
+
+    def test_analogs_endpoint_returns_matrix_result(self):
+        with sync_test_paths() as (index_path, _):
+            self._write_index(index_path)
+            with override_settings(CATALOG_INDEX_PATH=index_path):
+                response = self.client.get("/api/analogs", {"id": 1})
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["results"][0]["id"], 2)
+
+    def test_search_endpoint_returns_bad_request_without_query(self):
+        response = self.client.get("/api/search")
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.json()["error"]["code"], "invalid_query")
+
+    def test_semantic_search_separates_required_and_desired_parameters(self):
+        with sync_test_paths() as (index_path, _):
+            index_path.write_text(
+                json.dumps(
+                    {
+                        "items": [
+                            {
+                                "id": 201,
+                                "name": "Автоматический выключатель",
+                                "properties": {"NOMINAL_CURRENT": "16А", "POLES": "3"},
+                            },
+                            {
+                                "id": 202,
+                                "name": "Автоматический выключатель",
+                                "properties": {"NOMINAL_CURRENT": "25А", "POLES": "1"},
+                            },
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            result = semantic_search_catalog("нужен автомат 16А, желательно 3 полюса", index_path)
+
+        self.assertEqual(result["mode"], "semantic")
+        self.assertIn("16а", result["parsed"]["required"])
+        self.assertIn("3", result["parsed"]["desired"])
+        self.assertEqual(result["results"][0]["id"], 201)
+        self.assertIn("обязательные параметры", result["results"][0]["explanation"])
+
+    def test_semantic_search_returns_at_most_five_candidates(self):
+        with sync_test_paths() as (index_path, _):
+            self._write_index(index_path)
+            result = semantic_search_catalog("автоматический выключатель", index_path)
+
+        self.assertLessEqual(len(result["results"]), 5)
