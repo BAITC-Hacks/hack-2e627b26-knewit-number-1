@@ -1,4 +1,5 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import OrbitDeliveryHero from "./OrbitDeliveryHero.jsx";
 import {
   CartApiError,
   confirmCartAction,
@@ -2070,24 +2071,7 @@ function SitePreview({ cart, shopCartItems, language, onLanguageRequest, onOpenC
         </div>
       </nav>
 
-      <section className="hero-preview" id="top">
-        <div className="hero-copy">
-          <p className="eyebrow">{copy.eyebrow}</p>
-          <h1>{copy.hero}</h1>
-          <p className="hero-description">{copy.description}</p>
-          <div className="hero-actions">
-            <a className="primary-button" href="#catalog">{copy.openCatalog}</a>
-            <button className="text-button" onClick={onOpenChat} type="button">{copy.ask} <span>↗</span></button>
-          </div>
-        </div>
-        <div className="hero-card" aria-label={copy.stats}>
-          <div className="hero-card-top"><span className="hero-card-live"><span /> DEMO PREVIEW</span><span>2026</span></div>
-          <div className="hero-card-label">{copy.catalogNearby}</div>
-          <div className="hero-card-value">14<span>k</span></div>
-          <div className="hero-card-caption">{copy.pages}</div>
-          <div className="hero-card-chart"><i /><i /><i /><i /><i /><i /><i /></div>
-        </div>
-      </section>
+      <OrbitDeliveryHero copy={copy} onOpenChat={onOpenChat} />
 
       <section className="category-section" id="catalog">
         <div className="section-heading"><div><span className="section-overline">{copy.overline}</span><h2>{copy.find}</h2></div><a className="section-note section-note-link" href="#catalog">Все</a></div>

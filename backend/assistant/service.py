@@ -14,6 +14,7 @@ from assistant.localization import (
 )
 from assistant.openai_client import LlmUnavailable, OpenAIResponsesClient
 from cart.service import expire_proposed_actions, owner_key_for_session
+from dialog.payment_safety import redact_payment_data
 
 
 _SESSION_KEY = "assistant_dialog_languages"
@@ -133,10 +134,13 @@ def _instructions(language: str, catalog_context: dict[str, Any]) -> str:
 
 
 def generate_reply(*, text: str, language: str) -> dict[str, Any]:
-    context = catalog_search_context(text, language)
+    # Keep this boundary safe for callers other than the HTTP view as well.
+    # The view rejects payment data; direct/service callers get a redacted value.
+    safe_text = redact_payment_data(text)
+    context = catalog_search_context(safe_text, language)
     try:
         reply = OpenAIResponsesClient.from_settings().create_response(
-            instructions=_instructions(language, context), input_text=text
+            instructions=_instructions(language, context), input_text=safe_text
         )
     except LlmUnavailable:
         return {

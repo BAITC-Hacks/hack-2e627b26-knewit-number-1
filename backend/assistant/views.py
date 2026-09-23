@@ -7,6 +7,7 @@ from django.http import HttpRequest, JsonResponse
 from django.views.decorators.http import require_POST
 
 from assistant.errors import AssistantApiError
+from dialog.payment_safety import PAYMENT_DATA_MESSAGE, contains_payment_data
 from assistant.service import generate_reply, resolve_dialog_language
 
 
@@ -55,8 +56,11 @@ def chat_message(request: HttpRequest) -> JsonResponse:
         text = payload.get("text")
         if not isinstance(text, str) or not text.strip() or len(text) > 4000:
             raise AssistantApiError(400, "invalid_request", "text must be a non-empty string up to 4000 characters")
+        text = text.strip()
+        if contains_payment_data(text):
+            raise AssistantApiError(400, "payment_data_detected", PAYMENT_DATA_MESSAGE)
         response = _language_result(request, payload, message=text)
-        response["reply"] = generate_reply(text=text.strip(), language=response["language"])
+        response["reply"] = generate_reply(text=text, language=response["language"])
         return JsonResponse(response)
     except AssistantApiError as exc:
         return _error_response(exc)

@@ -41,6 +41,12 @@ Routes:
 - `GET /ready`
 - `GET /metrics`
 
+Chat payment-data safety: messages containing card numbers, CVV/CVC, IBAN, or bank
+requisites are rejected with HTTP 400 and error code `payment_data_detected` before
+they are appended to the session or sent to the LLM. Legacy session history is
+scrubbed at read time, and the LLM history boundary performs a second redaction.
+The original message is never included in the response or structured logs.
+
 Both providers expose the same routes. Set `CATALOG_PROVIDER=ekt` and configure
 `EKT_API_USERNAME` / `EKT_API_PASSWORD` to proxy the live read-only API.
 The live adapter rejects redirects, requires an HTTPS base URL, caps response
