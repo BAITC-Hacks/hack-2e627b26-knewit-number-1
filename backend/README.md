@@ -23,6 +23,7 @@ Routes:
 - `GET /api/search/semantic?q=автоматический выключатель 16А`
 - `GET /api/cart`
 - `GET /api/analogs?id=900001`
+- `GET /api/session`
 - `GET /api/dialog`
 - `POST /api/dialog/messages`
 - `POST /api/dialog/messages/{message_id}/retry`
@@ -116,6 +117,19 @@ catalog results. A cart proposal may be returned, but the cart is not mutated
 until the existing explicit confirmation endpoint is called. `POST
 /api/dialog/cancel` marks the current operation cancelled; `DELETE
 /api/dialog/history` starts a fresh dialog without touching other session data.
+
+## BFF gateway
+
+All `/api/*` routes pass through the gateway. `GET /api/session` identifies the
+request as `guest` or `authenticated` using Django authentication without
+returning the raw session key. Requests are throttled by source IP and, once a
+session exists, by session key. The limit is configured with
+`API_RATE_LIMIT_PER_MINUTE`; exceeded requests return HTTP 429 with
+`Retry-After`, `X-RateLimit-Limit` and `X-RateLimit-Remaining`. The prototype
+limiter is process-local; a multi-instance deployment should move the counter
+to shared Redis or another shared rate-limit store. EKT credentials are read
+only from backend environment variables and are never accepted from browser
+requests.
 
 ## Fixture data
 

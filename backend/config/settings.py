@@ -21,18 +21,26 @@ ALLOWED_HOSTS = [
 
 ROOT_URLCONF = "config.urls"
 INSTALLED_APPS = [
+    "django.contrib.contenttypes",
+    "django.contrib.auth",
     "django.contrib.sessions",
     "django.contrib.staticfiles",
     "catalog",
     "cart",
+    "dialog",
+    "gateway",
 ]
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
+    "django.contrib.auth.middleware.AuthenticationMiddleware",
+    "gateway.middleware.ApiGatewayMiddleware",
     "config.observability.ObservabilityMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
 ]
+
+API_RATE_LIMIT_PER_MINUTE = max(1, int(os.environ.get("API_RATE_LIMIT_PER_MINUTE", "1000")))
 
 DATABASES = {
     "default": {
