@@ -358,6 +358,9 @@ class DialogToolRegistry:
             }
 
         provider = self._provider_factory()
+        source_product = _detail(provider.get_product(product_id))
+        if source_product.get("id") != product_id:
+            raise ToolExecutionError("catalog returned a different source product")
         verified: list[dict[str, Any]] = []
         for candidate in ranked.get("results", [])[:limit]:
             if not isinstance(candidate, dict):
@@ -396,6 +399,7 @@ class DialogToolRegistry:
             "status": "ok" if verified else "no_live_compatible_analogs",
             "manager_review_required": False,
             "critical_parameters": ranked.get("critical_parameters", []),
+            "source_product": source_product,
             "analogs": verified[:limit],
             "count": len(verified[:limit]),
         }

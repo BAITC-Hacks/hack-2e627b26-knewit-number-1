@@ -330,6 +330,62 @@ function formatDataAge(value, language = DEFAULT_LANGUAGE) {
   return copy.dataAgeDays(Math.floor(ageSeconds / 86400));
 }
 
+function safeCatalogDocumentUrl(value) {
+  if (typeof value !== "string" || !value.trim()) return null;
+  const url = value.trim();
+  if (url.startsWith("/") && !url.startsWith("//")) return url;
+  try {
+    const parsed = new URL(url);
+    if (
+      parsed.protocol !== "https:"
+      || !["ekt.kz", "www.ekt.kz"].includes(parsed.hostname)
+      || parsed.username
+      || parsed.password
+      || parsed.hash
+    ) return null;
+    return parsed.href;
+  } catch {
+    return null;
+  }
+}
+
+function productDocuments(product, language = DEFAULT_LANGUAGE) {
+  const copy = getMessages(language).product;
+  const sources = [
+    ["certificate", product?.certificate],
+    ["certificate", product?.certificates],
+    ["document", product?.documents],
+    ["instruction", product?.instructions],
+    ["document", product?.files],
+  ];
+  const labels = {
+    certificate: copy.certificate,
+    document: copy.document,
+    instruction: copy.instruction,
+  };
+  const documents = [];
+
+  for (const [kind, source] of sources) {
+    const entries = Array.isArray(source) ? source : [source];
+    for (const entry of entries) {
+      const url = safeCatalogDocumentUrl(
+        typeof entry === "string" ? entry : entry?.url ?? entry?.href ?? entry?.link ?? entry?.file ?? entry?.source_url,
+      );
+      if (!url || documents.some((document) => document.url === url)) continue;
+      const label = typeof entry === "object" && entry
+        ? entry.title ?? entry.name ?? entry.label ?? labels[kind]
+        : labels[kind];
+      documents.push({ label: displayProductValue(label, language), url });
+    }
+  }
+  return documents;
+}
+
+function analogParameterLabel(value, language = DEFAULT_LANGUAGE) {
+  const parameter = String(value ?? "").trim();
+  return getMessages(language).analog.parameters[parameter] ?? displayProductValue(parameter, language);
+}
+
 const PRODUCT_PROPERTY_FIELDS = [
   ["SERIES", "SERIA", "SERIIA"],
   ["KOLICHESTVO_POLYUSOV"],
@@ -338,6 +394,12 @@ const PRODUCT_PROPERTY_FIELDS = [
   ["NOMINALNOE_NAPRYAZHENIE"],
   ["TORGOVAYA_MARKA", "BRAND"],
 ];
+const PRODUCT_PROPERTY_IGNORED = new Set(["CATEGORY", "ANALOG_GROUP", "SEARCH_ALIASES", "FIXTURE_NOTE"]);
+
+function productPropertyLabel(key, language = DEFAULT_LANGUAGE) {
+  const labels = getMessages(language).product.propertyLabels;
+  return labels[key] ?? String(key).replace(/_/g, " ");
+}
 
 function getProductCharacteristics(product, language = DEFAULT_LANGUAGE) {
   const labels = getMessages(language).product.characteristics;
@@ -349,11 +411,18 @@ function getProductCharacteristics(product, language = DEFAULT_LANGUAGE) {
   }
 
   const properties = product?.properties && typeof product.properties === "object" ? product.properties : {};
-  const mapped = PRODUCT_PROPERTY_FIELDS.map((keys, index) => {
+  const usedKeys = new Set();
+  const mapped = PRODUCT_PROPERTY_FIELDS.flatMap((keys, index) => {
     const key = keys.find((candidate) => properties[candidate] !== undefined);
-    return [labels[index], key ? properties[key] : undefined];
+    if (!key || properties[key] === null || properties[key] === "") return [];
+    usedKeys.add(key);
+    return [[labels[index], properties[key]]];
   });
-  if (mapped.some(([, value]) => value !== undefined && value !== null && value !== "")) return mapped;
+  const extras = Object.entries(properties)
+    .filter(([key, value]) => !usedKeys.has(key) && !PRODUCT_PROPERTY_IGNORED.has(key) && value !== null && value !== "")
+    .slice(0, 8)
+    .map(([key, value]) => [productPropertyLabel(key, language), value]);
+  if (mapped.length > 0 || extras.length > 0) return [...mapped, ...extras];
   return [[getMessages(language).product.characteristicsTitle, getMessages(language).analog.infoMissing]];
 }
 
@@ -368,15 +437,22 @@ function ProductCard({ cartStatus, language, messageId, onCreateProposal, produc
     .some((value) => String(value ?? "").toLowerCase() === "cached" || String(value ?? "").toLowerCase() === "cache");
   const verifiedAt = product?.verified_at ?? product?.verifiedAt;
   const characteristics = getProductCharacteristics(product, language);
+  const documents = productDocuments(product, language);
   const sellableQuantity = toFiniteNumber(product?.availability?.sellable_quantity);
-  const quantity = sellableQuantity ?? toFiniteNumber(product?.quantity);
+  const rawQuantity = toFiniteNumber(product?.quantity);
+  const quantity = sellableQuantity ?? rawQuantity;
   const quantityKnown = quantity !== null;
   const isSellable = product?.availability?.status === "available" && sellableQuantity > 0;
-  const availability = product?.availability?.status === "availability_unknown"
-    ? productCopy.availabilityUnknown
-    : quantityKnown
-      ? quantity > 0 ? productCopy.available(quantity) : productCopy.unavailable
-      : productCopy.availabilityMissing;
+  const availabilityStatus = product?.availability?.status;
+  const availability = availabilityStatus === "available"
+    ? sellableQuantity !== null ? productCopy.available(sellableQuantity, product?.availability?.unit) : productCopy.availabilityUnknown
+    : availabilityStatus === "unavailable"
+      ? productCopy.unavailable
+      : availabilityStatus === "availability_unknown" || availabilityStatus === "stale"
+        ? productCopy.availabilityUnknown
+        : quantityKnown
+          ? quantity > 0 ? productCopy.available(quantity) : productCopy.unavailable
+          : productCopy.availabilityMissing;
   const isProposing = proposalState === "proposing";
   const numericQuantity = Number(selectedQuantity);
   const quantityIsValid = Number.isInteger(numericQuantity) && numericQuantity > 0;
@@ -422,6 +498,20 @@ function ProductCard({ cartStatus, language, messageId, onCreateProposal, produc
             </div>
           ))}
         </dl>
+        {documents.length > 0 && (
+          <section className="product-card-documents" aria-label={productCopy.documents}>
+            <h4>{productCopy.documents}</h4>
+            <ul>
+              {documents.map((document) => (
+                <li key={document.url}>
+                  <a href={document.url} rel="noopener noreferrer" target="_blank">
+                    {document.label} <span aria-hidden="true">↗</span>
+                  </a>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
         {(product?.fit_reason || product?.important_difference) && (
           <div className="product-card-notes">
             {product.fit_reason && <p><strong>{productCopy.fit}</strong> {product.fit_reason}</p>}
@@ -543,12 +633,12 @@ function AnalogComparisonCard({ comparison, language }) {
         {matches.length > 0 ? (
           <ul className="analog-match-list">
             {matches.map((item, index) => {
-              const label = Array.isArray(item) ? item[0] : item?.label;
-              const value = Array.isArray(item) ? item[1] : item?.value;
+              const label = Array.isArray(item) ? item[0] : item?.label ?? item?.parameter;
+              const value = Array.isArray(item) ? item[1] : item?.value ?? item?.candidate;
               return (
                 <li key={`${label ?? "match"}-${index}`}>
                   <Icon name="check" size={13} />
-                  <span>{displayProductValue(label, language)}</span>
+                  <span>{analogParameterLabel(label, language)}</span>
                   <strong>{displayProductValue(value, language)}</strong>
                 </li>
               );
@@ -564,13 +654,13 @@ function AnalogComparisonCard({ comparison, language }) {
         {differences.length > 0 ? (
           <div className="analog-difference-list">
             {differences.map((difference, index) => (
-              <div className="analog-difference" key={`${difference?.label ?? "difference"}-${index}`}>
-                <strong>{displayProductValue(difference?.label, language)}</strong>
+              <div className="analog-difference" key={`${difference?.label ?? difference?.parameter ?? "difference"}-${index}`}>
+                <strong>{analogParameterLabel(difference?.label ?? difference?.parameter, language)}</strong>
                 <dl>
                   <div><dt>{copy.original}</dt><dd>{displayProductValue(difference?.source, language)}</dd></div>
-                  <div><dt>{copy.analog}</dt><dd>{displayProductValue(difference?.analog, language)}</dd></div>
+                  <div><dt>{copy.analog}</dt><dd>{displayProductValue(difference?.analog ?? difference?.candidate, language)}</dd></div>
                 </dl>
-                <p>{displayProductValue(difference?.note, language)}</p>
+                <p>{displayProductValue(difference?.note ?? copy.differenceKinds[difference?.kind], language)}</p>
               </div>
             ))}
           </div>
@@ -1265,7 +1355,7 @@ function ChatWidget({ cartStatus, isOpen, language, languageChangeRequest, onCar
             role: "assistant",
             content: sanitizeAssistantText(response?.content, language),
             product: response?.product ?? response?.products?.[0],
-            analogComparison: response?.analogComparison,
+            analogComparison: response?.analogComparison ?? response?.analog_comparison ?? response?.analog_comparisons?.[0],
             cartAction: response?.cart_proposal,
             cartPhase: response?.cart_proposal ? "proposed" : undefined,
             time: getTimeLabel(language),

@@ -484,3 +484,74 @@ describe("cart confirmation flow", () => {
     expect(screen.getByRole("button", { name: "Қазақша" })).toHaveAttribute("aria-pressed", "true");
   });
 });
+
+describe("catalog facts in chat", () => {
+  beforeEach(() => {
+    document.cookie = "csrftoken=csrf-ui-token; path=/";
+  });
+
+  it("renders verified detail facts, safe document links, and the server's analog comparison", async () => {
+    const user = userEvent.setup();
+    const detailProduct = {
+      ...PRODUCT,
+      quantity: 99,
+      availability: { status: "unavailable", sellable_quantity: 0 },
+      properties: { TORGOVAYA_MARKA: "IEK", POWER: "18W" },
+      certificates: [
+        { name: "Сертификат соответствия", url: "https://ekt.kz/docs/certificate.pdf" },
+        { name: "Небезопасный файл", url: "javascript:alert(1)" },
+      ],
+    };
+    const comparison = {
+      source_product: detailProduct,
+      analog: {
+        ...PRODUCT,
+        id: 900002,
+        name: "Светильник LED ДПО 18W IEK",
+        article: "ДЕМО-03-002",
+        price: 1200,
+        availability: { status: "available", sellable_quantity: 3, unit: "шт." },
+        data_status: "live",
+      },
+      why_fits: "Совпадают мощность и назначение.",
+      matching_parameters: [{ parameter: "power", source: "18W", candidate: "18W" }],
+      differences: [{ parameter: "ip_rating", source: "IP44", candidate: "IP65", kind: "higher_protection" }],
+    };
+    installFetch(undefined, (request) => {
+      if (request.text === "покажи детали") {
+        return {
+          dialog_id: "dialog-test",
+          state: "done",
+          message: { id: "details", role: "assistant", state: "done", content: "Детали товара.", products: [detailProduct] },
+        };
+      }
+      if (request.text === "подбери аналог") {
+        return {
+          dialog_id: "dialog-test",
+          state: "done",
+          message: { id: "analog", role: "assistant", state: "done", content: "Подобрал аналог.", analog_comparison: comparison },
+        };
+      }
+      return null;
+    });
+
+    render(<App />);
+    await user.click(screen.getByRole("button", { name: /открыть чат/i }));
+    const input = screen.getByLabelText("Введите сообщение");
+
+    await user.type(input, "покажи детали");
+    await user.keyboard("{Enter}");
+    const card = await screen.findByRole("article", { name: /Автоматический выключатель/ });
+    expect(within(card).getByText("Нет в наличии")).toBeInTheDocument();
+    expect(within(card).getByText("18W")).toBeInTheDocument();
+    expect(within(card).getByRole("link", { name: /Сертификат соответствия/ })).toHaveAttribute("href", "https://ekt.kz/docs/certificate.pdf");
+    expect(within(card).queryByRole("link", { name: /Небезопасный файл/ })).not.toBeInTheDocument();
+
+    await user.type(input, "подбери аналог");
+    await user.keyboard("{Enter}");
+    const analogCard = await screen.findByRole("article", { name: /Сравнение аналога/ });
+    expect(within(analogCard).getByText("Совпадают мощность и назначение.")).toBeInTheDocument();
+    expect(within(analogCard).getByText("Мощность")).toBeInTheDocument();
+    expect(within(analogCard).getByText("У аналога выше степень защиты.")).toBeInTheDocument();
+  });
+});
