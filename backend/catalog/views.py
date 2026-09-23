@@ -11,6 +11,7 @@ from django.views.decorators.http import require_GET
 
 from catalog.errors import CatalogError
 from catalog.analogs import find_analogs
+from catalog.safety import sanitize_catalog_payload
 from catalog.search import SearchIndexError, search_catalog, semantic_search_catalog
 from config.observability import add_stage, record_metric
 from catalog.providers import get_catalog_provider
@@ -72,7 +73,7 @@ def products(request: HttpRequest) -> JsonResponse:
         provider = get_catalog_provider()
         page = _positive_int(request, "page", 1)
         per_page = _positive_int(request, "per_page", 20, maximum=100)
-        return JsonResponse(provider.list_products(page, per_page, _fixture_case(request)))
+        return JsonResponse(sanitize_catalog_payload(provider.list_products(page, per_page, _fixture_case(request))))
     except CatalogError as exc:
         return _error_response(exc, getattr(provider, "data_source", "unknown"))
     finally:
@@ -86,7 +87,7 @@ def product_detail(request: HttpRequest) -> JsonResponse:
     try:
         provider = get_catalog_provider()
         product_id = _positive_int(request, "id", 0)
-        return JsonResponse(provider.get_product(product_id, _fixture_case(request)))
+        return JsonResponse(sanitize_catalog_payload(provider.get_product(product_id, _fixture_case(request))))
     except CatalogError as exc:
         return _error_response(exc, getattr(provider, "data_source", "unknown"))
     finally:
@@ -96,6 +97,8 @@ def product_detail(request: HttpRequest) -> JsonResponse:
 @require_GET
 def search(request: HttpRequest) -> JsonResponse:
     query = request.GET.get("q", "")
+    if len(query) > 1200:
+        return JsonResponse({"error": {"code": "invalid_query", "message": "q is too long"}}, status=400)
     started = time.perf_counter()
     try:
         result = search_catalog(query, settings.CATALOG_INDEX_PATH, settings.CATALOG_SEARCH_MAX_RESULTS)
@@ -106,12 +109,14 @@ def search(request: HttpRequest) -> JsonResponse:
     finally:
         add_stage("local_search", started)
     record_metric("search_success_total" if result["results"] else "search_empty_total")
-    return JsonResponse(result)
+    return JsonResponse(sanitize_catalog_payload(result))
 
 
 @require_GET
 def semantic_search(request: HttpRequest) -> JsonResponse:
     query = request.GET.get("q", "")
+    if len(query) > 1200:
+        return JsonResponse({"error": {"code": "invalid_query", "message": "q is too long"}}, status=400)
     started = time.perf_counter()
     try:
         result = semantic_search_catalog(query, settings.CATALOG_INDEX_PATH, settings.CATALOG_SEARCH_MAX_RESULTS)
@@ -122,7 +127,7 @@ def semantic_search(request: HttpRequest) -> JsonResponse:
     finally:
         add_stage("semantic_search", started)
     record_metric("semantic_search_success_total" if result["results"] else "semantic_search_empty_total")
-    return JsonResponse(result)
+    return JsonResponse(sanitize_catalog_payload(result))
 
 
 @require_GET
@@ -144,7 +149,7 @@ def analogs(request: HttpRequest) -> JsonResponse:
     except SearchIndexError as exc:
         return JsonResponse({"error": {"code": "search_index_unavailable", "message": str(exc)}}, status=503)
     record_metric("analogs_success_total" if result["results"] else "analogs_empty_total")
-    return JsonResponse(result)
+    return JsonResponse(sanitize_catalog_payload(result))
 
 
 @require_GET

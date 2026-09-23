@@ -11,6 +11,7 @@ from django.views.decorators.http import require_GET, require_http_methods, requ
 from cart.errors import CartApiError
 from cart.service import action_snapshot, create_action, owner_key_for_session
 from catalog.search import SearchIndexError, search_catalog, semantic_search_catalog
+from catalog.safety import sanitize_catalog_payload, sanitize_text
 
 
 MAX_HISTORY = 50
@@ -93,7 +94,7 @@ def _search_answer(text: str) -> tuple[str, list[dict[str, Any]]]:
         result = search_catalog(text, settings.CATALOG_INDEX_PATH, settings.CATALOG_SEARCH_MAX_RESULTS)
     except ValueError:
         result = semantic_search_catalog(text, settings.CATALOG_INDEX_PATH, settings.CATALOG_SEARCH_MAX_RESULTS)
-    products = result.get("results", [])
+    products = [sanitize_catalog_payload(item) for item in result.get("results", []) if isinstance(item, dict)]
     if not products:
         return "Не нашёл подходящую позицию в локальном индексе. Уточните артикул, назначение или характеристику.", []
     return f"Нашёл {len(products)} вариант(а). Уточните, какой товар использовать дальше.", products
@@ -140,7 +141,7 @@ def _process(request: HttpRequest, dialog: dict[str, Any], text: str) -> dict[st
             "products": [reference],
         }
     content, products = _search_answer(text)
-    return {"content": content, "products": products}
+    return {"content": sanitize_text(content), "products": products}
 
 
 def _json_body(request: HttpRequest) -> dict[str, Any]:

@@ -41,6 +41,7 @@ MIDDLEWARE = [
 ]
 
 API_RATE_LIMIT_PER_MINUTE = max(1, int(os.environ.get("API_RATE_LIMIT_PER_MINUTE", "1000")))
+API_MAX_BODY_BYTES = max(1024, int(os.environ.get("API_MAX_BODY_BYTES", "262144")))
 
 DATABASES = {
     "default": {

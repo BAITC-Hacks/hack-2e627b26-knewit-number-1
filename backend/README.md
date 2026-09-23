@@ -131,6 +131,16 @@ to shared Redis or another shared rate-limit store. EKT credentials are read
 only from backend environment variables and are never accepted from browser
 requests.
 
+## Security boundary
+
+Catalog, uploaded-file and web-page values are treated as untrusted data. The
+response sanitizer removes executable HTML/Markdown and rejects dangerous,
+non-allowlisted URLs; catalog text is never interpreted as an instruction or a
+tool command. Cart tools accept only server-validated integer IDs, quantities,
+message identifiers and the approved offer contract, and cart mutations remain
+protected by CSRF and session ownership checks. Basic Auth is created only by
+the server-side EKT adapter and is not returned in errors, logs or responses.
+
 ## Fixture data
 
 The fixture dataset is deterministic: version `catalog-fixture-v1`, seed

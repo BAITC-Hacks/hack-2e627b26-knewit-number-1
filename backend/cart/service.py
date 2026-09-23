@@ -14,12 +14,19 @@ from django.utils import timezone
 
 from catalog.errors import CatalogError
 from catalog.providers import get_catalog_provider
+from catalog.safety import sanitize_catalog_payload
 from cart.errors import CartApiError
 from config.observability import record_event, record_metric, safe_identifier
 from cart.models import Cart, CartAction, CartItem, CartMutation
 
 
 CONFIRMATION_ALLOWLIST = frozenset({"да", "подтверждаю", "добавить в корзину"})
+
+CART_ACTION_SCHEMA = {
+    "type": "object",
+    "required": ("dialog_id", "message_id", "message_version", "product_id", "quantity"),
+    "additionalProperties": False,
+}
 
 
 class StaleCartCondition(Exception):
@@ -69,6 +76,9 @@ def _validate_identifier(value: Any, name: str) -> str:
 
 
 def validate_create_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    allowed_fields = set(CART_ACTION_SCHEMA["required"]) | {"offer_id"}
+    if set(payload) - allowed_fields:
+        raise CartApiError(400, "invalid_request", "Cart action contains unsupported fields")
     dialog_id = _validate_identifier(payload.get("dialog_id"), "dialog_id")
     message_id = _validate_identifier(payload.get("message_id"), "message_id")
     message_version = payload.get("message_version")
@@ -179,7 +189,7 @@ def _load_detail(product_id: int) -> dict[str, Any]:
         raise CartApiError(exc.status_code, exc.code, exc.message) from exc
     if not isinstance(detail, dict):
         raise CartApiError(502, "invalid_catalog_response", "Catalog returned invalid product data")
-    return detail
+    return sanitize_catalog_payload(detail)
 
 
 def _detail_values(detail: dict[str, Any], expected_product_id: int) -> dict[str, Any]:

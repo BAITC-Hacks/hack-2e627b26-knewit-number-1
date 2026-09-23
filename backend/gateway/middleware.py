@@ -39,6 +39,16 @@ class ApiGatewayMiddleware:
         if not request.path.startswith("/api/"):
             return self.get_response(request)
 
+        try:
+            content_length = int(request.META.get("CONTENT_LENGTH") or 0)
+        except (TypeError, ValueError):
+            content_length = 0
+        if content_length > settings.API_MAX_BODY_BYTES:
+            return JsonResponse(
+                {"error": {"code": "request_too_large", "message": "Request body is too large"}},
+                status=413,
+            )
+
         limit = max(1, int(settings.API_RATE_LIMIT_PER_MINUTE))
         window = 60.0
         now = time.monotonic()
