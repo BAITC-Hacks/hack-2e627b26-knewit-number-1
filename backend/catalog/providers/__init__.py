@@ -11,6 +11,7 @@ def get_catalog_provider():
             sellable_store_ids=settings.FIXTURE_SELLABLE_STORE_IDS,
             availability_rule_version=settings.FIXTURE_AVAILABILITY_RULE_VERSION,
             timeout_seconds=settings.FIXTURE_TIMEOUT_SECONDS,
+            default_currency=settings.CATALOG_DEFAULT_CURRENCY,
         )
     if settings.CATALOG_PROVIDER == "ekt":
         return EktCatalogProvider(
@@ -27,6 +28,7 @@ def get_catalog_provider():
             max_retries=settings.EKT_MAX_RETRIES,
             retry_jitter_seconds=settings.EKT_RETRY_JITTER_SECONDS,
             max_response_bytes=settings.EKT_MAX_RESPONSE_BYTES,
+            default_currency=settings.CATALOG_DEFAULT_CURRENCY,
         )
     raise CatalogConfigurationError(
         f"Unsupported CATALOG_PROVIDER={settings.CATALOG_PROVIDER!r}; expected 'ekt' or 'fixture'"

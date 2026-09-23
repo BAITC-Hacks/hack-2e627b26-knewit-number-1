@@ -23,6 +23,8 @@ Routes:
 - `POST /api/cart/actions`
 - `POST /api/cart/actions/{action_id}/confirm`
 - `POST /api/cart/actions/confirm-text`
+- `POST /api/chat/language`
+- `POST /api/chat/messages`
 - `GET /demo/cart/`
 - `GET /health`
 
@@ -31,6 +33,12 @@ Both providers expose the same routes. Set `CATALOG_PROVIDER=ekt` and configure
 The live adapter rejects redirects, requires an HTTPS base URL, caps response
 size, and applies separate connect/read timeouts. Set `DJANGO_ENV=production`
 with a strong `DJANGO_SECRET_KEY` in deployed environments.
+
+Product detail responses keep every original provider field and add a separate
+`normalized` object. It contains structured price and availability snapshots,
+raw properties plus approved normalized attributes, opaque `offers`, and source
+timestamps. When the source omits currency, `CATALOG_DEFAULT_CURRENCY` is used;
+missing price, unit, step, and source update time remain `null`.
 
 ## Fixture data
 
@@ -81,6 +89,34 @@ multiple of 1, and a configurable `CART_MAX_QUANTITY` (10,000 by default).
 SQLite uses `BEGIN IMMEDIATE` plus bounded lock retries so concurrent demo
 requests serialize safely; production deployment should use a database with
 real row-level locking before enabling a non-fixture cart adapter.
+
+## Kazakh chat locale
+
+The chat service keeps a locale per browser session and dialog. A client can
+set it explicitly with `POST /api/chat/language`:
+
+```json
+{"dialog_id":"dialog-1","language":"kk"}
+```
+
+Otherwise, the first substantive message chooses Kazakh (`kk`) or Russian
+(`ru`). Kazakh need phrases are converted to catalog lookup terms while the
+article, brand, and official product name stay unchanged. This is only a query
+normalization layer: catalog price, stock, and certificate facts must always be
+obtained from the same catalog source for either language.
+
+Changing an established dialog language expires every still-proposed cart
+action for that dialog. The response contains a localized, non-confirmable
+summary and requires a new cart proposal plus a fresh explicit confirmation.
+Kazakh exact confirmations include `иә`, `растаймын`, and `себетке қосыңыз`.
+
+The Responses API adapter is disabled by default. To use it in a deployed
+environment, set `ASSISTANT_LLM_PROVIDER=openai`, `OPENAI_API_KEY`, and
+`OPENAI_MODEL` in the deployment secret store. The client sends requests only
+to the fixed HTTPS OpenAI Responses endpoint, uses `store: false`, and returns
+a generic localized availability message instead of a provider error. Static
+Kazakh KB entries have a review gate: copy without a named reviewer and review
+date is never returned.
 
 Error/data fixtures are selected with either `fixture_case=...` or the
 `X-Fixture-Scenario` header:

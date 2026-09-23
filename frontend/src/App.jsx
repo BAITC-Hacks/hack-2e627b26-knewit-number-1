@@ -17,6 +17,10 @@ const SUGGESTIONS = [
     label: "Условия доставки",
     prompt: "Есть ли доставка в Алматы и от какой суммы она бесплатная?",
   },
+  {
+    label: "Аналог отсутствующего товара",
+    prompt: "Подберите аналог отсутствующего автомата 3P",
+  },
 ];
 
 const DEMO_PRODUCT = {
@@ -39,6 +43,51 @@ const DEMO_PRODUCT = {
   ],
   fit_reason: "Подходит для промышленной и коммерческой сети, если нужны 3 полюса и ток до 160 А.",
   important_difference: "Перед заказом проверьте ток уставки: в свойствах каталога также указано номинальное значение 250 А.",
+};
+
+const DEMO_ANALOG_COMPARISON = {
+  is_demo: true,
+  source_product: {
+    id: 900003,
+    name: "Автоматический выключатель ВА47-29 3P 10A IEK",
+    article: "ДЕМО-01-003",
+  },
+  analog: {
+    id: 900006,
+    name: "Автоматический выключатель ВА47-29 3P 16A IEK",
+    article: "ДЕМО-01-006",
+    price: { amount: 1625, currency: "KZT" },
+    availability: { status: "available", sellable_quantity: 1, unit: "шт." },
+    data_status: "live",
+    verified_at: new Date().toISOString(),
+  },
+  why_fits: "Та же серия, бренд и трёхполюсное исполнение. Аналог есть в продаваемом остатке.",
+  matching_parameters: [
+    ["Категория", "Автоматический выключатель"],
+    ["Серия", "ВА47-29"],
+    ["Количество полюсов", "3P"],
+    ["Бренд", "IEK"],
+  ],
+  differences: [
+    {
+      label: "Номинальный ток",
+      source: "10 A",
+      analog: "16 A",
+      note: "Существенное отличие: подтвердите допустимый ток до замены.",
+    },
+    {
+      label: "Цена",
+      source: "1 167 ₸",
+      analog: "1 625 ₸",
+      note: "Аналог дороже на 458 ₸ по данным demo-fixture.",
+    },
+    {
+      label: "Продаваемый остаток",
+      source: "0 шт.",
+      analog: "1 шт.",
+      note: "Аналог доступен, исходная позиция недоступна.",
+    },
+  ],
 };
 
 function createWelcomeMessage() {
@@ -88,6 +137,19 @@ function createAssistantResponse(prompt) {
 
   if (normalized.includes("кабел")) {
     return "Помогу подобрать кабель по сечению, материалу жил, напряжению и способу прокладки. Уточните длину и где он будет использоваться — так я отберу релевантные позиции из каталога.";
+  }
+
+  if (normalized.includes("аналог")) {
+    return {
+      content: "Нашёл доступный аналог и сравнил критичные параметры:",
+      analogComparison: {
+        ...DEMO_ANALOG_COMPARISON,
+        analog: {
+          ...DEMO_ANALOG_COMPARISON.analog,
+          verified_at: new Date().toISOString(),
+        },
+      },
+    };
   }
 
   if (normalized.includes("автомат") || normalized.includes("legrand")) {
@@ -301,6 +363,110 @@ function ProductCard({ product }) {
   );
 }
 
+function formatMoney(amount, currency) {
+  const value = toFiniteNumber(amount);
+  if (value === null) return "Информация не найдена";
+  const currencyLabel = currency === "KZT" ? "₸" : displayProductValue(currency);
+  return `${new Intl.NumberFormat("ru-RU").format(value)} ${currencyLabel}`;
+}
+
+function AnalogComparisonCard({ comparison }) {
+  const sourceProductRaw = comparison?.source_product ?? comparison?.original_product ?? {};
+  const sourceProduct = sourceProductRaw?.normalized ?? sourceProductRaw;
+  const analogRaw = comparison?.analog ?? {};
+  const analog = analogRaw?.normalized ?? analogRaw;
+  const analogPrice = analog?.price && typeof analog.price === "object" ? analog.price : {};
+  const analogAvailability = analog?.availability && typeof analog.availability === "object"
+    ? analog.availability
+    : {};
+  const sellableQuantity = toFiniteNumber(analogAvailability.sellable_quantity);
+  const isAvailable = analogAvailability.status === "available" && sellableQuantity !== null && sellableQuantity > 0;
+  const isLive = String(analogRaw.data_status ?? analogRaw.status ?? analog.data_status ?? "").toLowerCase() === "live";
+  const verifiedAt = analogAvailability.verified_at ?? analogPrice.verified_at ?? analogRaw.verified_at;
+  const matches = Array.isArray(comparison?.matching_parameters) ? comparison.matching_parameters : [];
+  const differences = Array.isArray(comparison?.differences) ? comparison.differences : [];
+
+  return (
+    <article className="analog-card" aria-label={`Сравнение аналога: ${displayProductValue(analog.name)}`}>
+      <div className="analog-card-topline">
+        <span className="analog-card-label">Рекомендуемый аналог</span>
+        {comparison?.is_demo && <span className="analog-demo-badge">DEMO fixture</span>}
+      </div>
+      <div className="analog-source">
+        <span>Вместо</span>
+        <strong>{displayProductValue(sourceProduct.name)}</strong>
+        <small>Артикул: {displayProductValue(sourceProduct.article)}</small>
+      </div>
+      <div className="analog-arrow" aria-hidden="true">↓</div>
+      <div className="analog-product">
+        <h3>{displayProductValue(analog.name)}</h3>
+        <span>Артикул: {displayProductValue(analog.article)}</span>
+        <div className="analog-commerce">
+          <strong>{formatMoney(analogPrice.amount ?? analog.price, analogPrice.currency ?? analog.currency)}</strong>
+          <span className={isAvailable ? "analog-stock analog-stock--available" : "analog-stock"}>
+            {isAvailable
+              ? `В наличии: ${sellableQuantity} ${displayProductValue(analogAvailability.unit ?? "шт.")}`
+              : analogAvailability.status === "unavailable"
+                ? "Нет в наличии"
+                : "Наличие: информация не найдена"}
+          </span>
+        </div>
+        <div className={`analog-verification ${isLive ? "analog-verification--live" : "analog-verification--cached"}`}>
+          <span className="analog-verification-dot" />
+          <strong>{isLive ? "Цена и наличие проверены live" : "Цена и наличие не подтверждены live"}</strong>
+          <span>Проверено: {formatVerifiedAt(verifiedAt)}</span>
+        </div>
+      </div>
+
+      <section className="analog-reason" aria-label="Почему подходит">
+        <span>Почему подходит</span>
+        <p>{displayProductValue(comparison?.why_fits)}</p>
+      </section>
+
+      <section className="analog-section" aria-label="Совпадающие параметры">
+        <h4>Совпадающие параметры</h4>
+        {matches.length > 0 ? (
+          <ul className="analog-match-list">
+            {matches.map((item, index) => {
+              const label = Array.isArray(item) ? item[0] : item?.label;
+              const value = Array.isArray(item) ? item[1] : item?.value;
+              return (
+                <li key={`${label ?? "match"}-${index}`}>
+                  <Icon name="check" size={13} />
+                  <span>{displayProductValue(label)}</span>
+                  <strong>{displayProductValue(value)}</strong>
+                </li>
+              );
+            })}
+          </ul>
+        ) : (
+          <p className="analog-missing">Информация не найдена</p>
+        )}
+      </section>
+
+      <section className="analog-section" aria-label="Существенные отличия">
+        <h4>Существенные отличия</h4>
+        {differences.length > 0 ? (
+          <div className="analog-difference-list">
+            {differences.map((difference, index) => (
+              <div className="analog-difference" key={`${difference?.label ?? "difference"}-${index}`}>
+                <strong>{displayProductValue(difference?.label)}</strong>
+                <dl>
+                  <div><dt>Исходный</dt><dd>{displayProductValue(difference?.source)}</dd></div>
+                  <div><dt>Аналог</dt><dd>{displayProductValue(difference?.analog)}</dd></div>
+                </dl>
+                <p>{displayProductValue(difference?.note)}</p>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <p className="analog-missing">Информация не найдена</p>
+        )}
+      </section>
+    </article>
+  );
+}
+
 function MessageBubble({ message, onSuggestion, onRetry }) {
   const isUser = message.role === "user";
   const paragraphs = sanitizeAssistantText(message.content).split(/\n{2,}/);
@@ -320,6 +486,7 @@ function MessageBubble({ message, onSuggestion, onRetry }) {
           <p key={`${message.id}-paragraph-${index}`}>{paragraph}</p>
         ))}
         {message.product && <ProductCard product={message.product} />}
+        {message.analogComparison && <AnalogComparisonCard comparison={message.analogComparison} />}
         {message.suggestions && (
           <div className="suggestion-list" aria-label="Примеры запросов">
             {message.suggestions.map((suggestion) => (
@@ -505,6 +672,7 @@ function ChatWidget({ isOpen, onOpenChange }) {
             role: "assistant",
             content: sanitizeAssistantText(response?.content),
             product: response?.product,
+            analogComparison: response?.analogComparison,
             time: getTimeLabel(),
           },
         ]);

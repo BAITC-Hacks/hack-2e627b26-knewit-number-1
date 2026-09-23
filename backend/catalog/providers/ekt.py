@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 from catalog.availability import calculate_availability
 from catalog.errors import CatalogConfigurationError, CatalogError, CatalogTimeoutError, CatalogTransportError
+from catalog.normalization import normalize_product
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class EktCatalogProvider:
     max_retries: int = 2
     retry_jitter_seconds: float = 0.1
     max_response_bytes: int = 5_000_000
+    default_currency: str | None = "KZT"
     data_source: str = "ekt"
 
     def __post_init__(self) -> None:
@@ -225,13 +227,20 @@ class EktCatalogProvider:
     def get_product(self, product_id: int, fixture_case: str | None = None) -> dict[str, Any]:
         del fixture_case
         payload = self._mark_source(self._request("products/detail", {"id": product_id}))
+        fetched_at = datetime.now(timezone.utc)
         payload["availability"] = calculate_availability(
             payload.get("stores"),
             payload.get("quantity"),
             self.sellable_store_ids,
             self.availability_rule_version,
-            observed_at=datetime.now(timezone.utc),
+            observed_at=fetched_at,
             stale_after_seconds=self.availability_stale_after_seconds,
+        )
+        payload["normalized"] = normalize_product(
+            payload,
+            default_currency=self.default_currency,
+            availability=payload["availability"],
+            fetched_at=fetched_at,
         )
         payload["cart_policy"] = {
             "automatic_add_allowed": False,

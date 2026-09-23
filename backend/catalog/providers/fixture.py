@@ -4,10 +4,12 @@ import copy
 import hashlib
 import time
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from catalog.availability import calculate_availability
 from catalog.errors import CatalogError, CatalogTimeoutError
+from catalog.normalization import normalize_product
 
 
 FIXTURE_DATASET_VERSION = "catalog-fixture-v1"
@@ -123,6 +125,7 @@ class FixtureCatalogProvider:
     sellable_store_ids: tuple[int, ...]
     availability_rule_version: str
     timeout_seconds: float
+    default_currency: str | None = "KZT"
     data_source: str = "fixture"
 
     def _apply_scenario(self, fixture_case: str | None) -> None:
@@ -193,11 +196,19 @@ class FixtureCatalogProvider:
         if product_id not in PRODUCTS_BY_ID:
             raise CatalogError(404, "product_not_found", f"Product {product_id} was not found")
         payload = copy.deepcopy(PRODUCTS_BY_ID[product_id])
+        fetched_at = datetime.now(timezone.utc)
         payload["availability"] = calculate_availability(
             payload["stores"],
             payload["quantity"],
             self.sellable_store_ids,
             self.availability_rule_version,
+            observed_at=fetched_at,
         )
         self._mutate_for_data_scenario(payload, fixture_case)
+        payload["normalized"] = normalize_product(
+            payload,
+            default_currency=self.default_currency,
+            availability=payload["availability"],
+            fetched_at=fetched_at,
+        )
         return payload
