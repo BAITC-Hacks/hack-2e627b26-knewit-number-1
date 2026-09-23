@@ -179,6 +179,37 @@ class FixtureCatalogApiTests(SimpleTestCase):
         self.assertEqual(product_page.status_code, 200)
         self.assertContains(product_page, "DEMO FIXTURE")
 
+    def test_request_id_is_returned_and_observability_endpoints_expose_metrics(self):
+        response = self.client.get("/api/products", headers={"X-Request-ID": "trace-test-1"})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["X-Request-ID"], "trace-test-1")
+
+        metrics = self.client.get("/metrics")
+        self.assertEqual(metrics.status_code, 200)
+        body = metrics.json()
+        self.assertGreaterEqual(body["counters"]["http_requests_total"], 1)
+        self.assertIn("http_request", body["latency_ms"])
+
+    @override_settings(CATALOG_INDEX_PATH=Path(".definitely-missing-catalog-index.json"))
+    def test_readiness_reports_missing_index(self):
+        response = self.client.get("/ready")
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.json()["status"], "not_ready")
+        self.assertFalse(response.json()["checks"]["catalog_index"])
+
+    @override_settings(CATALOG_PROVIDER="invalid")
+    def test_health_is_liveness_and_does_not_require_provider(self):
+        response = self.client.get("/health")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["service"], "alive")
+
+    def test_upstream_failure_marks_catalog_data_as_stale(self):
+        response = self.client.get("/api/products", {"fixture_case": "server_error"})
+        self.assertEqual(response.status_code, 503)
+        body = response.json()
+        self.assertEqual(body["data_freshness"], "stale")
+        self.assertFalse(body["price_and_availability_current"])
+
 
 class AvailabilityRuleTests(SimpleTestCase):
     def test_missing_quantity_is_unknown(self):

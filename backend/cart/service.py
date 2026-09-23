@@ -15,6 +15,7 @@ from django.utils import timezone
 from catalog.errors import CatalogError
 from catalog.providers import get_catalog_provider
 from cart.errors import CartApiError
+from config.observability import record_event, record_metric, safe_identifier
 from cart.models import Cart, CartAction, CartItem, CartMutation
 
 
@@ -353,6 +354,13 @@ def create_action(owner_key: str, payload: dict[str, Any]) -> tuple[CartAction, 
 
 
 def _saved_success(action: CartAction, mutation: CartMutation | None = None) -> dict[str, Any]:
+    if mutation is not None:
+        record_metric("cart_duplicate_prevented_total")
+        record_event(
+            "cart.duplicate_prevented",
+            action_id=safe_identifier(action.id),
+            idempotency_key=safe_identifier(action.idempotency_key),
+        )
     result = mutation.result if mutation is not None else action.result
     if not result:
         raise CartApiError(409, "action_in_progress", "Cart action is still being reconciled")

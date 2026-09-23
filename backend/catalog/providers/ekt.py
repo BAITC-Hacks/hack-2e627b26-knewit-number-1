@@ -16,6 +16,7 @@ from urllib.parse import urlsplit
 
 from catalog.availability import calculate_availability
 from catalog.errors import CatalogConfigurationError, CatalogError, CatalogTimeoutError, CatalogTransportError
+from config.observability import observe_latency, record_event, record_metric
 
 logger = logging.getLogger(__name__)
 
@@ -135,11 +136,20 @@ class EktCatalogProvider:
     def _request(self, path: str, params: dict[str, Any]) -> dict[str, Any]:
         deadline = time.monotonic() + self.deadline_seconds
         for attempt in range(self.max_retries + 1):
+            started = time.perf_counter()
+            record_metric("catalog_api_requests_total")
             try:
                 return self._request_once(path, params, deadline)
             except CatalogConfigurationError:
                 raise
             except CatalogError as exc:
+                record_metric(f"catalog_api_errors_{exc.code}_total")
+                record_event(
+                    "catalog.api.error",
+                    status_code=exc.status_code,
+                    error_type=exc.code,
+                    attempt=attempt + 1,
+                )
                 retryable = isinstance(exc, (CatalogTimeoutError, CatalogTransportError)) or (
                     exc.status_code == 429 or exc.status_code >= 500
                 )
@@ -156,6 +166,8 @@ class EktCatalogProvider:
                 if remaining is not None and delay >= remaining:
                     raise CatalogTimeoutError("EKT API retry deadline exceeded") from exc
                 time.sleep(delay)
+            finally:
+                observe_latency("catalog_api", (time.perf_counter() - started) * 1000)
         raise CatalogTransportError()
 
     def _sanitize_external_urls(self, value: Any) -> Any:

@@ -8,6 +8,8 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
+from config.observability import set_cache_hit
+
 
 class SearchIndexError(Exception):
     pass
@@ -54,6 +56,7 @@ def _load_items(index_path: Path) -> tuple[dict[str, Any], ...]:
     key = (str(index_path.resolve()), stat.st_mtime_ns, stat.st_size)
     with _cache_lock:
         if key == _cache_key:
+            set_cache_hit(True)
             return _cache_items
         try:
             payload = json.loads(index_path.read_text(encoding="utf-8"))
@@ -65,6 +68,7 @@ def _load_items(index_path: Path) -> tuple[dict[str, Any], ...]:
         valid_items = tuple(item for item in items if isinstance(item, dict) and isinstance(item.get("id"), int))
         _cache_key = key
         _cache_items = valid_items
+        set_cache_hit(False)
         return _cache_items
 
 

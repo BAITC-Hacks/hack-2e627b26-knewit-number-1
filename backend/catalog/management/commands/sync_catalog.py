@@ -6,6 +6,7 @@ from django.core.management.base import BaseCommand, CommandError
 
 from catalog.index_sync import sync_catalog
 from catalog.providers import get_catalog_provider
+from config.observability import observe_latency, record_event, record_metric
 
 
 class Command(BaseCommand):
@@ -30,6 +31,18 @@ class Command(BaseCommand):
             max_pages=options["max_pages"],
             per_page=options["per_page"],
             include_details=options["include_details"],
+        )
+        record_metric("catalog_sync_runs_total")
+        record_metric("catalog_sync_success_total" if result.success else "catalog_sync_failures_total")
+        observe_latency("catalog_sync", result.duration_seconds * 1000)
+        record_event(
+            "catalog.sync.completed",
+            success=result.success,
+            stop_reason=result.stop_reason,
+            pages=result.pages,
+            products=result.products,
+            errors=result.errors,
+            duration_ms=round(result.duration_seconds * 1000, 3),
         )
         self.stdout.write(json.dumps(asdict(result), ensure_ascii=False, indent=2, default=str))
         if not result.success:

@@ -27,12 +27,25 @@ Routes:
 - `POST /api/cart/actions/confirm-text`
 - `GET /demo/cart/`
 - `GET /health`
+- `GET /ready`
+- `GET /metrics`
 
 Both providers expose the same routes. Set `CATALOG_PROVIDER=ekt` and configure
 `EKT_API_USERNAME` / `EKT_API_PASSWORD` to proxy the live read-only API.
 The live adapter rejects redirects, requires an HTTPS base URL, caps response
 size, and applies separate connect/read timeouts. Set `DJANGO_ENV=production`
 with a strong `DJANGO_SECRET_KEY` in deployed environments.
+
+## Observability
+
+`/health` is a liveness probe and does not call the upstream catalog. `/ready`
+returns HTTP 200 only when the configured provider and local catalog index are
+available; otherwise it returns HTTP 503. `/metrics` returns the in-process
+counters and latency percentiles (p50/p95/p99), plus the persisted last-sync
+status. The HTTP middleware returns `X-Request-ID` and writes structured JSON
+events with a hashed session identifier. Passwords, cookies, tokens, request
+bodies and file contents are not logged. Cart action and idempotency identifiers
+are hashed before logging.
 
 ## Full catalog index
 

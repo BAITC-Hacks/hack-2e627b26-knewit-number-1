@@ -29,6 +29,7 @@ INSTALLED_APPS = [
 MIDDLEWARE = [
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
+    "config.observability.ObservabilityMiddleware",
     "django.middleware.common.CommonMiddleware",
     "django.middleware.csrf.CsrfViewMiddleware",
 ]
@@ -110,3 +111,6 @@ CATALOG_SYNC_PER_PAGE = int(os.environ.get("CATALOG_SYNC_PER_PAGE", "100"))
 CATALOG_SYNC_INTERVAL_HOURS = float(os.environ.get("CATALOG_SYNC_INTERVAL_HOURS", "24"))
 CATALOG_SYNC_INCLUDE_DETAILS = os.environ.get("CATALOG_SYNC_INCLUDE_DETAILS", "false").lower() in {"1", "true", "yes"}
 CATALOG_SEARCH_MAX_RESULTS = max(1, int(os.environ.get("CATALOG_SEARCH_MAX_RESULTS", "5")))
+PROMPT_VERSION = os.environ.get("PROMPT_VERSION", "not_configured")
+MODEL_VERSION = os.environ.get("MODEL_VERSION", "not_configured")
+CATALOG_INDEX_VERSION = os.environ.get("CATALOG_INDEX_VERSION", "catalog-index-v1")
