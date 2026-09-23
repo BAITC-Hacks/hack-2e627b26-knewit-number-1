@@ -14,6 +14,7 @@ from dialog.llm import (
     SAFE_REFUSAL_RU,
     compose_message,
 )
+from dialog.payment_safety import PAYMENT_DATA_REDACTED
 from dialog.tools import DialogToolRegistry, TOOL_DEFINITIONS, ToolValidationError
 
 
@@ -203,6 +204,17 @@ class OpenAIOrchestratorTests(SimpleTestCase):
         self.assertFalse(
             any(tool["name"] == "http_get" for tool in transport.payloads[0][0]["tools"])
         )
+
+    def test_payment_data_is_redacted_before_openai_payload(self):
+        transport = QueueTransport([final_response()])
+        raw = "Оплатить картой 4111 1111 1111 1111, CVV 123"
+
+        self.orchestrator(transport).run([{"role": "user", "content": raw}])
+
+        serialized = json.dumps(transport.payloads, ensure_ascii=False)
+        self.assertNotIn("4111", serialized)
+        self.assertNotIn("CVV 123", serialized)
+        self.assertIn(PAYMENT_DATA_REDACTED, serialized)
 
     def test_model_cannot_select_product_not_returned_by_tools(self):
         transport = QueueTransport(

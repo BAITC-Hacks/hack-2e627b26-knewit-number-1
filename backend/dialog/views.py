@@ -21,6 +21,12 @@ from dialog.llm import (
     PROCESSING_TOKEN_RU,
     llm_is_configured,
 )
+from dialog.payment_safety import (
+    PAYMENT_DATA_MESSAGE,
+    PAYMENT_DATA_REDACTED,
+    PaymentDataDetected,
+    contains_payment_data,
+)
 from catalog.providers.fixture import PRODUCTS
 from knowledge_base.engine import answer_query
 
@@ -57,6 +63,19 @@ def _get_dialog(request: HttpRequest) -> dict[str, Any]:
         dialog = _new_dialog()
         request.session["dialog_context"] = dialog
         request.session.modified = True
+    else:
+        changed = False
+        for message in dialog["history"]:
+            if not isinstance(message, dict) or message.get("role") != "user":
+                continue
+            content = message.get("content")
+            if isinstance(content, str) and contains_payment_data(content):
+                message["content"] = PAYMENT_DATA_REDACTED
+                message["state"] = "blocked"
+                changed = True
+        if changed:
+            request.session["dialog_context"] = dialog
+            request.session.modified = True
     return dialog
 
 
@@ -223,10 +242,15 @@ def _validated_message(request: HttpRequest, dialog: dict[str, Any]) -> str:
         raise ValueError("text must be a non-empty string up to 1200 characters")
     if body.get("dialog_id") and body["dialog_id"] != dialog["dialog_id"]:
         raise ValueError("dialog_id does not match the current session dialog")
-    return text.strip()
+    text = text.strip()
+    if contains_payment_data(text):
+        raise PaymentDataDetected
+    return text
 
 
 def _append_user_message(dialog: dict[str, Any], text: str) -> dict[str, Any]:
+    if contains_payment_data(text):
+        raise PaymentDataDetected
     dialog["state"] = "processing"
     dialog["version"] += 1
     user_message = {
@@ -257,6 +281,18 @@ def dialog_message(request: HttpRequest) -> JsonResponse:
         dialog["state"] = "done"
         _save_dialog(request, dialog)
         return JsonResponse({"dialog_id": dialog["dialog_id"], "state": "done", "message": assistant_message})
+    except PaymentDataDetected:
+        dialog["state"] = "blocked"
+        _save_dialog(request, dialog)
+        return JsonResponse(
+            {
+                "dialog_id": dialog["dialog_id"],
+                "state": "blocked",
+                "retryable": False,
+                "error": {"code": "payment_data_detected", "message": PAYMENT_DATA_MESSAGE},
+            },
+            status=400,
+        )
     except (ValueError, SearchIndexError) as exc:
         dialog["state"] = "error"
         _save_dialog(request, dialog)
@@ -279,6 +315,18 @@ def dialog_message_stream(request: HttpRequest) -> StreamingHttpResponse | JsonR
     dialog = _get_dialog(request)
     try:
         text = _validated_message(request, dialog)
+    except PaymentDataDetected:
+        dialog["state"] = "blocked"
+        _save_dialog(request, dialog)
+        return JsonResponse(
+            {
+                "dialog_id": dialog["dialog_id"],
+                "state": "blocked",
+                "retryable": False,
+                "error": {"code": "payment_data_detected", "message": PAYMENT_DATA_MESSAGE},
+            },
+            status=400,
+        )
     except ValueError as exc:
         return JsonResponse(
             {
@@ -343,6 +391,14 @@ def dialog_retry(request: HttpRequest, message_id: str) -> JsonResponse:
     previous = next((item for item in reversed(dialog["history"]) if item.get("id") == message_id and item.get("role") == "user"), None)
     if previous is None:
         return JsonResponse({"error": {"code": "message_not_found", "message": "User message was not found"}}, status=404)
+    if previous.get("state") == "blocked" or contains_payment_data(previous.get("content")):
+        previous["content"] = PAYMENT_DATA_REDACTED
+        previous["state"] = "blocked"
+        _save_dialog(request, dialog)
+        return JsonResponse(
+            {"dialog_id": dialog["dialog_id"], "state": "blocked", "retryable": False, "error": {"code": "payment_data_detected", "message": PAYMENT_DATA_MESSAGE}},
+            status=400,
+        )
     request._body = __import__("json").dumps({"text": previous["content"], "dialog_id": dialog["dialog_id"]}).encode()
     return dialog_message(request)
 

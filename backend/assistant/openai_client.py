@@ -7,6 +7,8 @@ from urllib.request import Request, urlopen
 
 from django.conf import settings
 
+from dialog.payment_safety import redact_payment_data
+
 
 class LlmUnavailable(Exception):
     """A safe operational error: its text is never passed to chat users."""
@@ -57,6 +59,8 @@ class OpenAIResponsesClient:
         )
 
     def create_response(self, *, instructions: str, input_text: str) -> str:
+        # Keep the external-provider boundary safe even for non-HTTP callers.
+        input_text = redact_payment_data(input_text)
         body = json.dumps(
             {
                 "model": self.model,

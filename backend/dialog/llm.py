@@ -15,6 +15,7 @@ from django.conf import settings
 
 from catalog.safety import sanitize_catalog_payload, sanitize_text
 from config.observability import observe_latency, record_event, record_metric
+from dialog.payment_safety import redact_payment_data
 from dialog.tools import DialogToolRegistry, ToolExecutionError, ToolValidationError
 
 
@@ -324,7 +325,9 @@ def _history_input(history: Iterable[dict[str, Any]], max_chars: int) -> list[di
         content = message.get("content")
         if role not in {"user", "assistant"} or not isinstance(content, str):
             continue
-        clean = sanitize_text(content)
+        # Defense in depth: redact legacy/session content again immediately
+        # before constructing the provider payload.
+        clean = sanitize_text(redact_payment_data(content))
         if not clean:
             continue
         if len(clean) > remaining:
