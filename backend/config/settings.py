@@ -67,3 +67,13 @@ AVAILABILITY_STALE_AFTER_SECONDS = float(
     os.environ.get("AVAILABILITY_STALE_AFTER_SECONDS", "300")
 )
 FIXTURE_TIMEOUT_SECONDS = float(os.environ.get("FIXTURE_TIMEOUT_SECONDS", "3.1"))
+
+CATALOG_INDEX_PATH = Path(
+    os.environ.get("CATALOG_INDEX_PATH", str(BASE_DIR / "var" / "catalog_index.json"))
+)
+CATALOG_SYNC_STATUS_PATH = Path(
+    os.environ.get("CATALOG_SYNC_STATUS_PATH", str(BASE_DIR / "var" / "catalog_sync_status.json"))
+)
+CATALOG_SYNC_MAX_PAGES = int(os.environ.get("CATALOG_SYNC_MAX_PAGES", "1000"))
+CATALOG_SYNC_PER_PAGE = int(os.environ.get("CATALOG_SYNC_PER_PAGE", "100"))
+CATALOG_SYNC_INTERVAL_HOURS = float(os.environ.get("CATALOG_SYNC_INTERVAL_HOURS", "24"))

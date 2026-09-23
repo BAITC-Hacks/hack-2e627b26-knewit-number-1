@@ -26,6 +26,32 @@ The live adapter rejects redirects, requires an HTTPS base URL, caps response
 size, and applies separate connect/read timeouts. Set `DJANGO_ENV=production`
 with a strong `DJANGO_SECRET_KEY` in deployed environments.
 
+## Full catalog index
+
+Build or refresh the local ID-deduplicated index with:
+
+```bash
+cd backend
+python manage.py sync_catalog
+```
+
+The command walks pages until an empty page or a repeated page-ID signature.
+`CATALOG_SYNC_MAX_PAGES` is a safety guard; reaching it fails the run and does
+not replace the last successful index. The persisted files are written under
+`backend/var/` by default and are ignored by git:
+
+- `catalog_index.json` — sorted-by-ID product index; upstream order is not used;
+- `catalog_sync_status.json` — last successful sync, pages, products, errors,
+  duration, stop reason and warnings.
+
+The intended refresh interval is 24 hours (`CATALOG_SYNC_INTERVAL_HOURS=24`).
+The command is deliberately scheduler-agnostic: run it from Windows Task
+Scheduler, cron, or a container scheduler once per day. Example cron entry:
+
+```cron
+0 3 * * * cd /path/to/project/backend && /path/to/venv/bin/python manage.py sync_catalog
+```
+
 ## Fixture data
 
 The fixture dataset is deterministic: version `catalog-fixture-v1`, seed

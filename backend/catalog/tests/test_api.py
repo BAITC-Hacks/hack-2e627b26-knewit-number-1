@@ -1,12 +1,30 @@
 from datetime import datetime, timedelta, timezone
+import json
+from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import Mock, patch
 
 from django.test import SimpleTestCase, override_settings
 
 from catalog.availability import calculate_availability
 from catalog.errors import CatalogConfigurationError, CatalogError, CatalogTransportError
+from catalog.index_sync import sync_catalog
 from catalog.providers.ekt import EktCatalogProvider
-from catalog.providers.fixture import FIXTURE_DATASET_VERSION, FIXTURE_SEED
+from catalog.providers.fixture import FIXTURE_DATASET_VERSION, FIXTURE_SEED, FixtureCatalogProvider
+
+
+@contextmanager
+def sync_test_paths():
+    root = Path(__file__).resolve().parents[2]
+    index_path = root / ".test_catalog_index.json"
+    status_path = root / ".test_catalog_sync_status.json"
+    for path in (index_path, status_path):
+        path.unlink(missing_ok=True)
+    try:
+        yield index_path, status_path
+    finally:
+        for path in (index_path, status_path):
+            path.unlink(missing_ok=True)
 
 
 @override_settings(CATALOG_PROVIDER="fixture", FIXTURE_TIMEOUT_SECONDS=0)
@@ -336,3 +354,62 @@ class ProviderSwitchTests(SimpleTestCase):
         response = self.client.get("/api/products")
         self.assertEqual(response.status_code, 500)
         self.assertEqual(response.json()["error"]["code"], "catalog_configuration_error")
+
+
+class CatalogIndexSyncTests(SimpleTestCase):
+    def test_fixture_catalog_is_fully_indexed_and_deduplicated(self):
+        provider = FixtureCatalogProvider(
+            sellable_store_ids=(1, 2, 3),
+            availability_rule_version="fixture-v1",
+            timeout_seconds=0,
+        )
+        with sync_test_paths() as (index_path, status_path):
+            result = sync_catalog(provider, index_path, status_path, max_pages=20, per_page=20)
+
+            self.assertTrue(result.success)
+            self.assertEqual(result.stop_reason, "empty_page")
+            self.assertEqual(result.pages, 7)
+            self.assertEqual(result.products, 120)
+            index = json.loads(index_path.read_text(encoding="utf-8"))
+            ids = [item["id"] for item in index["items"]]
+            self.assertEqual(len(ids), 120)
+            self.assertEqual(len(set(ids)), 120)
+            self.assertEqual(ids, sorted(ids))
+            status = json.loads(status_path.read_text(encoding="utf-8"))
+            self.assertEqual(status["last_successful_products"], 120)
+            self.assertEqual(status["last_errors"], 0)
+
+    def test_repeated_page_ids_are_an_end_condition(self):
+        class RepeatingProvider:
+            data_source = "fixture"
+
+            def list_products(self, page, per_page):
+                del page, per_page
+                return {"items": [{"id": 1, "name": "one"}]}
+
+        with sync_test_paths() as (index_path, status_path):
+            result = sync_catalog(
+                RepeatingProvider(),
+                index_path,
+                status_path,
+                max_pages=10,
+                per_page=20,
+            )
+            self.assertTrue(result.success)
+            self.assertEqual(result.stop_reason, "repeated_page_ids")
+            self.assertEqual(result.pages, 2)
+            self.assertEqual(result.products, 1)
+
+    def test_max_pages_guard_does_not_replace_last_successful_index(self):
+        class EndlessProvider:
+            data_source = "fixture"
+
+            def list_products(self, page, per_page):
+                del per_page
+                return {"items": [{"id": page, "name": str(page)}]}
+
+        with sync_test_paths() as (index_path, status_path):
+            initial = sync_catalog(EndlessProvider(), index_path, status_path, max_pages=2, per_page=20)
+            self.assertFalse(initial.success)
+            self.assertEqual(initial.stop_reason, "max_pages_guard")
+            self.assertFalse(index_path.exists())
