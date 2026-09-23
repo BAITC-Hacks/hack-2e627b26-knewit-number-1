@@ -11,6 +11,7 @@ in [docs/ekt-api-contract.md](docs/ekt-api-contract.md).
 cd backend
 python -m venv .venv
 .venv/bin/pip install -r requirements.txt
+.venv/bin/python manage.py migrate
 CATALOG_PROVIDER=fixture .venv/bin/python manage.py runserver 127.0.0.1:8000
 ```
 
@@ -18,6 +19,11 @@ Routes:
 
 - `GET /api/products?page=1&per_page=20`
 - `GET /api/products/detail?id=900001`
+- `GET /api/cart`
+- `POST /api/cart/actions`
+- `POST /api/cart/actions/{action_id}/confirm`
+- `POST /api/cart/actions/confirm-text`
+- `GET /demo/cart/`
 - `GET /health`
 
 Both providers expose the same routes. Set `CATALOG_PROVIDER=ekt` and configure
@@ -39,6 +45,42 @@ must be approved by the product owner; positive stock without an approved
 allowlist produces `availability_unknown`. The fixture uses the separate
 `FIXTURE_SELLABLE_STORE_IDS` setting. Known service warehouses such as `Брак`
 and `перемещение` never count. An expired snapshot produces `stale`.
+
+## Fixture cart confirmation
+
+Cart state is isolated by the database-backed Django session. Fetch
+`GET /api/cart` first to establish the session and CSRF cookie, then send the
+cookie value in `X-CSRFToken` for JSON POST requests.
+
+Create a five-minute proposal with:
+
+```json
+{
+  "dialog_id": "dialog-1",
+  "message_id": "message-7",
+  "message_version": 1,
+  "product_id": 900001,
+  "offer_id": null,
+  "quantity": 2
+}
+```
+
+Only the returned `action_id` can confirm that exact snapshot. Replays use the
+same server-side idempotency key and return the stored result without adding a
+duplicate. Strict text confirmations are limited to `да`, `подтверждаю`, and
+`добавить в корзину` when the dialog has exactly one active proposal.
+
+The fixture adapter atomically checks price, availability, and cart version.
+When any value changes it expires the old action and returns a replacement
+proposal. With `CATALOG_PROVIDER=ekt`, cart proposals and mutations fail closed
+until ekt.kz provides a conditional cart API contract; the existing catalog
+read routes remain available.
+
+Fixture sales rules are bound into every action: pieces only, minimum/step/
+multiple of 1, and a configurable `CART_MAX_QUANTITY` (10,000 by default).
+SQLite uses `BEGIN IMMEDIATE` plus bounded lock retries so concurrent demo
+requests serialize safely; production deployment should use a database with
+real row-level locking before enabling a non-fixture cart adapter.
 
 Error/data fixtures are selected with either `fixture_case=...` or the
 `X-Fixture-Scenario` header:
